@@ -62,9 +62,10 @@ class AIConfigStore(JsonSettingsStore):
 
     def update(self, values: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(values)
+        has_api_key = "api_key" in payload
         api_key = payload.pop("api_key", None)
-        if api_key:
-            self.secret_store.set(str(api_key))
+        if has_api_key:
+            self.secret_store.set("" if api_key is None else str(api_key))
         # Never preserve a key that may have been written by an old build.
         result = super().update(payload)
         result.pop("api_key", None)

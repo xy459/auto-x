@@ -43,6 +43,27 @@ async def test_task_trigger_creates_one_run_per_account_with_shared_trigger(stor
     assert len(await store.list_runs(task_id="task-1")) == 3
 
 
+async def test_task_trigger_reads_task_inside_its_write_transaction(store):
+    await store.create_task(
+        Task(
+            id="transactional-task",
+            name="transactional",
+            program_name="browse_only",
+            account_ids=("a-1",),
+            params={},
+        )
+    )
+
+    async def stale_preflight_lookup(_task_id):
+        raise AssertionError("trigger_task must not preflight outside its transaction")
+
+    store.get_task = stale_preflight_lookup
+    runs = await store.trigger_task("transactional-task")
+
+    assert len(runs) == 1
+    assert runs[0].task_id == "transactional-task"
+
+
 async def test_scheduled_fire_reservation_and_runs_are_atomic(store, monkeypatch):
     task = Task(
         id="scheduled-task",
@@ -161,7 +182,7 @@ async def test_cancel_unclaimed_queue_finishes_immediately_but_claimed_queue_set
     assert (await store.get_run("claimed")).status is RunStatus.CANCELLED
 
 
-async def test_recovery_fails_running_releases_queue_claims_and_finishes_cancelled(store):
+async def test_recovery_marks_running_uncertain_releases_claims_and_finishes_cancelled(store):
     for run_id in ("running", "queued", "cancelled"):
         await store.create_run(
             TaskRunSnapshot(
@@ -181,8 +202,9 @@ async def test_recovery_fails_running_releases_queue_claims_and_finishes_cancell
     assert await store.recover_interrupted() == 1
 
     running = await store.get_run("running")
-    assert running.status is RunStatus.FAILED
+    assert running.status is RunStatus.UNCERTAIN
     assert running.error["code"] == "RUNNER_INTERRUPTED"
+    assert running.error["retryable"] is False
     queued = await store.get_run("queued")
     assert queued.status is RunStatus.QUEUED
     assert queued.claimed_by is None

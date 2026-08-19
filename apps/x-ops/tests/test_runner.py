@@ -389,6 +389,9 @@ async def test_external_task_cancel_releases_browser_lock_and_slot(store):
     assert browser.active_leases == 0
     assert locks.locked("browser-1") is False
     assert slots.active == 0
+    result = await store.get_run("external-cancel")
+    assert result.status is RunStatus.UNCERTAIN
+    assert result.error["code"] == "RUNNER_INTERRUPTED"
 
     # Prove both synchronization primitives remain usable, not merely that
     # their observable counters happen to be zero.
@@ -396,6 +399,37 @@ async def test_external_task_cancel_releases_browser_lock_and_slot(store):
     slot = await asyncio.wait_for(slots.acquire(), 1)
     lock.release()
     await slot.release()
+
+
+async def test_external_task_cancel_before_program_start_is_cancelled(store):
+    release = asyncio.Event()
+    first_started = asyncio.Event()
+
+    async def program(_context, _params):
+        first_started.set()
+        await release.wait()
+        return {}
+
+    await create_run(store, "holder")
+    await create_run(store, "hard-cancel-waiting")
+    runner = make_runner(store, program)
+    holder = asyncio.create_task(runner.execute("holder"))
+    await asyncio.wait_for(first_started.wait(), 1)
+    waiting = asyncio.create_task(runner.execute("hard-cancel-waiting"))
+    for _ in range(50):
+        if (await store.get_run("hard-cancel-waiting")).claimed_by:
+            break
+        await asyncio.sleep(0.01)
+
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+    result = await store.get_run("hard-cancel-waiting")
+    assert result.status is RunStatus.CANCELLED
+    assert result.error["code"] == "TASK_CANCELLED"
+    release.set()
+    await holder
 
 
 async def test_cleanup_warning_does_not_overwrite_success(store):

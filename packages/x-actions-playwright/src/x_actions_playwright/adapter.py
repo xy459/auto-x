@@ -115,19 +115,19 @@ def _normalized_media_path(value: object) -> str:
 class XAdapter:
     def __init__(self) -> None:
         self._selected_tweet_ids: WeakKeyDictionary[Any, str] = WeakKeyDictionary()
-        self._fallback_selected_tweet_ids: dict[int, str] = {}
+        self._fallback_selected_tweet_ids: dict[Any, str] = {}
 
     def get_selected_tweet_id(self, page: Page) -> str | None:
         try:
             return self._selected_tweet_ids.get(page)
         except TypeError:
-            return self._fallback_selected_tweet_ids.get(id(page))
+            return self._fallback_selected_tweet_ids.get(page)
 
     def _set_selected_tweet_id(self, page: Page, tweet_id: str) -> None:
         try:
             self._selected_tweet_ids[page] = tweet_id
         except TypeError:
-            self._fallback_selected_tweet_ids[id(page)] = tweet_id
+            self._fallback_selected_tweet_ids[page] = tweet_id
 
     async def dispatch(
         self,
@@ -410,9 +410,9 @@ class XAdapter:
         return {"status": "success", "evidence": ["native-copy-link-clicked"]}
 
     async def post_delete(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
-        tweet_id = payload.get("tweetId")
-        article = await self._require_tweet(page, tweet_id)
+        article = await self._require_tweet(page, payload.get("tweetId"))
         post = await self._post(article)
+        tweet_id = str(post["postId"])
         session = await self._account_session_data(page)
         if not session.get("username"):
             raise ActionError("STATE_UNKNOWN", "Could not identify the signed-in account before deleting.")
@@ -452,7 +452,7 @@ class XAdapter:
 
     async def image_open(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         article = await self._require_tweet(page, payload.get("tweetId"))
-        tweet_id = str(payload.get("tweetId"))
+        tweet_id = str((await self._post(article, include_ads=True))["postId"])
         links = article.locator(f'a[href*="/status/{tweet_id}/photo/"]')
         owned: list[Locator] = []
         for index in range(await links.count()):

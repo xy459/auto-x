@@ -18,7 +18,7 @@ def get_ai_settings(services: AdminServices = Depends(get_services)) -> JsonObje
 def update_ai_settings(
     body: AISettingsUpdate, services: AdminServices = Depends(get_services)
 ) -> JsonObject:
-    return services.ai_settings.update(body.model_dump())
+    return services.ai_settings.update(body.model_dump(exclude_unset=True))
 
 
 @router.post("/ai/test")

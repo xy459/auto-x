@@ -69,7 +69,8 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                     options=write_options(
                         context, f"like:{context.account.account_id}:{tweet_id}"
                     ),
-                )
+                ),
+                task_run_id=context.cancellation.task_run_id,
             )
             if result_status(result) == "success":
                 liked += 1

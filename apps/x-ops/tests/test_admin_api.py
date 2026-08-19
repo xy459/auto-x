@@ -290,6 +290,14 @@ def test_ai_key_is_never_returned_or_written_to_settings_json(tmp_path):
         assert "secret-value" not in public.text
         assert "secret-value" not in (tmp_path / "ai.json").read_text(encoding="utf-8")
 
+        preserved = client.put("/api/ai/settings", json={"model": "next-model"})
+        assert preserved.status_code == 200
+        assert preserved.json()["api_key_configured"] is True
+
+        cleared = client.put("/api/ai/settings", json={"api_key": ""})
+        assert cleared.status_code == 200
+        assert cleared.json()["api_key_configured"] is False
+
 
 class FakeBrowserClient:
     async def list_accounts(self):

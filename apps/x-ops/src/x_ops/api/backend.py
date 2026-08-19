@@ -526,6 +526,8 @@ class CoreAdminBackend:
                 + timedelta(seconds=int(runtime.get("default_task_timeout_seconds", 3600))),
                 fire_key=fire_key,
             )
+        except KeyError:
+            return None
         except ValueError as exc:
             raise AdminAPIError(409, str(exc)) from exc
         self._submit_runs(runs)

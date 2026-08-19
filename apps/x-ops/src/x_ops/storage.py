@@ -359,32 +359,35 @@ class SQLiteStore:
         deadline: datetime | None = None,
         fire_key: str | None = None,
     ) -> list[TaskRunSnapshot]:
-        task = await self.get_task(task_id)
-        if task is None:
-            raise KeyError(task_id)
-        if not task.enabled:
-            raise ValueError("cannot trigger a disabled task")
         group = trigger_id or str(uuid.uuid4())
         created = utc_now()
-        runs = [
-            TaskRunSnapshot(
-                id=str(uuid.uuid4()),
-                task_id=task.id,
-                trigger_id=group,
-                program_name=task.program_name,
-                requested_program_version=requested_program_version,
-                account_id=account_id,
-                params=dict(task.params),
-                status=RunStatus.QUEUED,
-                browser_end_policy=browser_end_policy,
-                deadline=deadline,
-                created_at=created,
-            )
-            for account_id in task.account_ids
-        ]
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
+                row = self._connection.execute(
+                    "SELECT * FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(task_id)
+                task = self._task_from_row(row)
+                if not task.enabled:
+                    raise ValueError("cannot trigger a disabled task")
+                runs = [
+                    TaskRunSnapshot(
+                        id=str(uuid.uuid4()),
+                        task_id=task.id,
+                        trigger_id=group,
+                        program_name=task.program_name,
+                        requested_program_version=requested_program_version,
+                        account_id=account_id,
+                        params=dict(task.params),
+                        status=RunStatus.QUEUED,
+                        browser_end_policy=browser_end_policy,
+                        deadline=deadline,
+                        created_at=created,
+                    )
+                    for account_id in task.account_ids
+                ]
                 if fire_key is not None:
                     reserved = self._connection.execute(
                         """
@@ -678,7 +681,7 @@ class SQLiteStore:
                 cursor = self._connection.execute(
                     """
                     UPDATE task_runs
-                    SET status = 'failed', error_json = ?, finished_at = ?
+                    SET status = 'uncertain', error_json = ?, finished_at = ?
                     WHERE status = 'running'
                     """,
                     (error, now),

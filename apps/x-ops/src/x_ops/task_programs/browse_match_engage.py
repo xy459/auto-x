@@ -70,7 +70,8 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                             context,
                             f"engage-like:{context.account.account_id}:{tweet_id}",
                         ),
-                    )
+                    ),
+                    task_run_id=context.cancellation.task_run_id,
                 )
                 if result_status(result) == "success":
                     liked += 1
@@ -91,7 +92,8 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                             context,
                             f"engage-reply:{context.account.account_id}:{tweet_id}",
                         ),
-                    )
+                    ),
+                    task_run_id=context.cancellation.task_run_id,
                 )
                 if result_status(result) == "success":
                     replied += 1

@@ -75,6 +75,16 @@ class TaskRunner:
         )
 
     async def execute(self, task_run_id: str) -> None:
+        try:
+            await self._execute(task_run_id)
+        except asyncio.CancelledError:
+            # asyncio.Task.cancel() is a hard runner interruption, not the
+            # cooperative Task SDK cancellation path. Persist a terminal
+            # state before preserving cancellation for the caller.
+            await asyncio.shield(self._record_hard_cancel(task_run_id))
+            raise
+
+    async def _execute(self, task_run_id: str) -> None:
         run = await self.run_store.get_run(task_run_id)
         if run is None or run.status is not RunStatus.QUEUED:
             return
@@ -129,6 +139,24 @@ class TaskRunner:
             async with slot:
                 logger.info("execution_slot_acquired")
                 await self._execute_in_slot(run, program, params, account, cancellation, logger)
+
+    async def _record_hard_cancel(self, task_run_id: str) -> None:
+        run = await self.run_store.get_run(task_run_id)
+        if (
+            run is None
+            or run.status.terminal
+            or run.claimed_by != self.runner_id
+        ):
+            return
+        program = self.program_registry.get(run.program_name)
+        logger = self._logger(run, program)
+        if run.status is RunStatus.RUNNING:
+            outcome = RunOutcome.uncertain(self._interrupted_error())
+        else:
+            outcome = RunOutcome.cancelled(
+                self._cancel_error(TaskCancelledError(run.id))
+            )
+        await self._finish(run, outcome, logger)
 
     async def _prepare(
         self,
@@ -363,6 +391,16 @@ class TaskRunner:
             str(exc),
             source="task-program",
             details={"action_id": exc.action_id, **exc.details},
+        )
+
+    @staticmethod
+    def _interrupted_error() -> RunError:
+        return RunError(
+            "RUNNER_INTERRUPTED",
+            "Runner execution was forcibly interrupted after the task started; "
+            "some business actions may have completed. Verify before rerunning.",
+            source="task-runner",
+            retryable=False,
         )
 
 

@@ -11,6 +11,7 @@ from x_ops.task_sdk import TaskCancelledError, TaskUncertainError
 
 class Cancellation:
     def __init__(self, cancel_after: int | None = None):
+        self.task_run_id = "run"
         self.checks = 0
         self.cancel_after = cancel_after
 
@@ -176,8 +177,17 @@ def test_uncertain_idempotency_reuse_is_not_treated_as_normal_skip():
             {
                 "status": "skipped",
                 "data": {"previous": {"state": "uncertain"}},
-            }
+            },
+            task_run_id="run",
         )
+
+
+def test_cancelled_action_preserves_real_task_run_id():
+    with pytest.raises(TaskCancelledError) as caught:
+        require_certain({"status": "cancelled"}, task_run_id="run-123")
+
+    assert caught.value.task_run_id == "run-123"
+    assert "run-123" in str(caught.value)
 
 
 async def test_timeline_navigation_is_retried_before_reporting_completion():

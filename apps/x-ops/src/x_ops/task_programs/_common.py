@@ -25,7 +25,7 @@ def result_data(result: Any) -> dict[str, Any]:
     return dict(data) if isinstance(data, Mapping) else {}
 
 
-def require_certain(result: Any) -> Any:
+def require_certain(result: Any, *, task_run_id: str) -> Any:
     status = result_status(result)
     data = result_data(result)
     previous = data.get("previous")
@@ -35,7 +35,7 @@ def require_certain(result: Any) -> Any:
         details = result.to_dict() if hasattr(result, "to_dict") else data
         raise TaskUncertainError(action_id=action, details=details)
     if status == "cancelled":
-        raise TaskCancelledError("action")
+        raise TaskCancelledError(task_run_id)
     if status in {"failed", "navigating"}:
         raise RuntimeError(f"Action did not complete: {status}")
     return result
@@ -132,7 +132,9 @@ async def run_timeline(
         if result_status(result) == "navigating":
             await context.cancellation.raise_if_cancelled()
             result = await method(payload, options=options)
-        result = require_certain(result)
+        result = require_certain(
+            result, task_run_id=context.cancellation.task_run_id
+        )
         data = result_data(result)
 
         if collect:
@@ -198,7 +200,9 @@ async def run_timeline_batches(
             # to hydrate instead of immediately counting a missing tab.
             await context.cancellation.sleep(0.5)
             result = await method(payload, options=options)
-        return require_certain(result)
+        return require_certain(
+            result, task_run_id=context.cancellation.task_run_id
+        )
 
     while True:
         await context.cancellation.raise_if_cancelled()

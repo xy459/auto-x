@@ -92,6 +92,36 @@ async def test_selected_post_is_scoped_to_its_page(page):
 
 
 @pytest.mark.asyncio
+async def test_selected_post_id_is_used_by_delete_result(page):
+    await page.set_content(tweet_html(own=True))
+    actions = XActions()
+    await actions.context.selectPost(page, {"tweetId": "100"})
+
+    result = await actions.post.delete(page, options={"confirmLive": True})
+
+    assert result.status == "success"
+    assert result.data["tweetId"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_selected_post_id_is_used_to_open_image(page):
+    await page.route(
+        "https://x.com/**",
+        lambda route: route.fulfill(status=200, body="<html></html>"),
+    )
+    await page.goto("https://x.com/home")
+    await page.set_content(tweet_html())
+    actions = XActions()
+    await actions.context.selectPost(page, {"tweetId": "100"})
+
+    result = await actions.image.open(page, {"index": 1})
+
+    assert result.status == "success"
+    assert result.data["viewer"]["tweetId"] == "100"
+    assert result.data["viewer"]["index"] == 1
+
+
+@pytest.mark.asyncio
 async def test_reply_dry_run_does_not_open_or_mutate_composer(page):
     await page.set_content(
         tweet_html()

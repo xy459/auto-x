@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from .adapter import XAdapter
 from .catalog import ACTION_CATEGORIES, ACTION_DEFINITIONS, get_action_definition, list_actions
@@ -60,7 +60,9 @@ class XActions:
         self.idempotency_store = idempotency_store or MemoryIdempotencyStore()
         self.default_timeout_ms = default_timeout_ms
         self._page_locks: WeakKeyDictionary[Any, asyncio.Lock] = WeakKeyDictionary()
-        self._fallback_page_locks: dict[int, asyncio.Lock] = {}
+        self._fallback_page_locks: WeakValueDictionary[int, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
         for category in ACTION_CATEGORIES:
             setattr(self, category, ActionNamespace(self, category))
 
