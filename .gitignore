@@ -3,10 +3,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.DS_Store
 .coverage
 htmlcov/
 .env
-config/accounts.json
-config/accounts.json*.bak
-config/secrets.json
+**/config/accounts.json
+**/config/accounts.json*.bak
+**/config/secrets.json
 logs/

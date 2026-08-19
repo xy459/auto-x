@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import pytest
+
+from x_actions_playwright import ActionError, XActions
+
+
+def tweet_html(post_id="100", username="alice", *, liked=False, quote=False, ad=False, own=False):
+    state = "unlike" if liked else "like"
+    quoted = """
+      <div data-testid="quoteTweet">
+        <a href="/quoted/status/999"><time datetime="2026-01-01T00:00:00Z"></time></a>
+        <a href="/quoted">Quoted</a><a href="/quoted">@quoted</a>
+        <div data-testid="tweetText">quoted text</div>
+        <button data-testid="like">quoted like</button>
+        <a href="/quoted/status/999/photo/1"><img src="https://img/quote.jpg"></a>
+      </div>
+    """ if quote else ""
+    return f"""
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/{username}">{username.title()}</a><a href="/{username}">@{username}</a></div>
+        <a href="/{username}/status/{post_id}"><time datetime="2026-01-01T00:00:00Z"></time></a>
+        <div data-testid="tweetText" lang="en">hello {post_id}</div>
+        <div role="group" aria-label="2 Replies, 3 Reposts, 1.2K Likes, 4K Views"></div>
+        <button data-testid="reply">reply</button>
+        <button data-testid="{state}" onclick="this.dataset.testid=this.dataset.testid==='like'?'unlike':'like'">like state</button>
+        <button data-testid="bookmark" onclick="this.dataset.testid='removeBookmark'">bookmark</button>
+        <button data-testid="retweet" onclick="document.querySelector('#repost-menu').hidden=false">repost</button>
+        <button data-testid="share" onclick="document.querySelector('#share-menu').hidden=false">share</button>
+        <button data-testid="caret" onclick="document.querySelector('#delete-menu').hidden=false">more</button>
+        <a href="/{username}/status/{post_id}/photo/1"><img alt="main" src="https://img/main.jpg"></a>
+        {quoted}
+        {'<span>Ad</span>' if ad else ''}
+      </article>
+      <div id="repost-menu" hidden><div role="menuitem" data-testid="retweetConfirm" onclick="document.querySelector('[data-testid=retweet]').dataset.testid='unretweet';this.remove()">Repost</div><div role="menuitem">Quote</div></div>
+      <div id="share-menu" hidden><div role="menuitem" data-testid="copyLink" onclick="this.remove()">Copy link</div></div>
+      <div id="delete-menu" hidden><div role="menuitem" onclick="document.querySelector('[data-testid=confirmationSheetConfirm]').hidden=false">Delete</div></div>
+      <div role="dialog"><button data-testid="confirmationSheetConfirm" hidden onclick="document.querySelector('article').remove();this.closest('[role=dialog]').remove()">Delete</button></div>
+      {f'<div data-testid="SideNav_AccountSwitcher_Button">Alice\n@alice</div>' if own else ''}
+    """
+
+
+@pytest.mark.asyncio
+async def test_post_details_scope_main_post_not_quote(page):
+    await page.set_content(tweet_html(quote=True))
+    actions = XActions()
+    result = await actions.post.getDetails(page, {"tweetId": "100"})
+    post = result.data["post"]
+    assert post["content"]["text"] == "hello 100"
+    assert post["media"]["imageCount"] == 1
+    assert post["quotedPost"]["postId"] == "999"
+    assert post["metrics"]["likeCount"] == 1200
+
+
+@pytest.mark.asyncio
+async def test_like_uses_target_state_and_never_quote_button(page):
+    await page.set_content(tweet_html(quote=True))
+    actions = XActions()
+    result = await actions.interaction.like(page, {"tweetId": "100"}, {"confirmLive": True})
+    assert result.status == "success"
+    assert await page.locator('article > button[data-testid="unlike"]').count() == 1
+    assert await page.locator('[data-testid="quoteTweet"] [data-testid="like"]').count() == 1
+    second = await actions.interaction.like(page, {"tweetId": "100"}, {"confirmLive": True})
+    assert second.status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_dry_run_does_not_click_write_action(page):
+    await page.set_content(tweet_html())
+    result = await XActions().interaction.like(page, {"tweetId": "100"}, {"dryRun": True})
+    assert result.status == "success"
+    assert await page.locator('article > button[data-testid="like"]').count() == 1
+
+
+@pytest.mark.asyncio
+async def test_ad_target_fails_closed(page):
+    await page.set_content(tweet_html(ad=True))
+    with pytest.raises(ActionError) as caught:
+        await XActions().post.getDetails(page, {"tweetId": "100"})
+    assert caught.value.code == "TARGET_UNSAFE"
+
+
+@pytest.mark.asyncio
+async def test_native_repost_menu_and_postcondition(page):
+    await page.set_content(tweet_html())
+    result = await XActions().interaction.repost(page, {"tweetId": "100"}, {"confirmLive": True})
+    assert result.status == "success"
+    assert await page.locator('[data-testid="unretweet"]').count() == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_checks_owner_and_confirms(page):
+    await page.set_content(tweet_html(own=True))
+    result = await XActions().post.delete(page, {"tweetId": "100"}, {"confirmLive": True})
+    assert result.status == "success"
+    assert result.data["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_delete_other_users_post_is_rejected(page):
+    html = tweet_html(username="bob") + '<div data-testid="SideNav_AccountSwitcher_Button">Alice\n@alice</div>'
+    await page.set_content(html)
+    with pytest.raises(ActionError) as caught:
+        await XActions().post.delete(page, {"tweetId": "100"}, {"confirmLive": True})
+    assert caught.value.code == "TARGET_UNSAFE"
+
+
+@pytest.mark.asyncio
+async def test_timeline_open_selects_requested_tab(page):
+    await page.set_content("""
+      <div role="tab" aria-selected="true" onclick="for(const x of document.querySelectorAll('[role=tab]'))x.ariaSelected='false';this.ariaSelected='true'">For you</div>
+      <div role="tab" aria-selected="false" onclick="for(const x of document.querySelectorAll('[role=tab]'))x.ariaSelected='false';this.ariaSelected='true'">Following</div>
+    """)
+    result = await XActions().timeline.open(page, {"feed": "following"})
+    assert result.status == "success"
+    assert await page.get_by_role("tab", name="Following").get_attribute("aria-selected") == "true"
+
+
+@pytest.mark.asyncio
+async def test_account_session_distinguishes_signed_in_and_out(page):
+    await page.set_content('<div data-testid="SideNav_AccountSwitcher_Button">Alice\n@alice</div>')
+    signed_in = await XActions().account.getSession(page)
+    assert signed_in.data["session"]["username"] == "alice"
+    await page.set_content('<a href="/i/flow/login">Log in</a>')
+    signed_out = await XActions().account.getSession(page)
+    assert signed_out.data["session"]["state"] == "unauthenticated"
+
+
+@pytest.mark.asyncio
+async def test_profile_terminal_errors_are_structured(page):
+    await page.goto("https://x.com/alice")
+    await page.set_content('<main data-testid="primaryColumn">Account suspended</main>')
+    with pytest.raises(ActionError) as caught:
+        await XActions().account.getDetails(page)
+    assert caught.value.code == "ACCOUNT_SUSPENDED"
+
+
+@pytest.mark.asyncio
+async def test_publish_uses_native_playwright_typing_and_success_toast(page):
+    await page.set_content("""
+      <button data-testid="SideNav_NewTweet_Button" onclick="document.querySelector('#dialog').hidden=false">Post</button>
+      <div id="dialog" role="dialog" hidden>
+        <div data-testid="tweetTextarea_0" contenteditable="true" role="textbox" oninput="document.querySelector('[data-testid=tweetButton]').disabled=!this.innerText.trim()"></div>
+        <button data-testid="tweetButton" disabled onclick="document.querySelector('[data-testid=toast]').hidden=false;document.querySelector('[data-testid=tweetTextarea_0]').innerText=''">Post</button>
+      </div>
+      <div data-testid="toast" hidden>Your post was sent successfully</div>
+    """)
+    result = await XActions().publish.post(page, {"text": "hello from Playwright"}, {"confirmLive": True})
+    assert result.status == "success"
+    assert result.data["contentHash"]
+
+
+@pytest.mark.asyncio
+async def test_publish_fails_closed_when_composer_layout_is_unsupported(page):
+    await page.set_content("<main>No composer</main>")
+    with pytest.raises(ActionError) as caught:
+        await XActions(default_timeout_ms=300).publish.post(page, {"text": "hello"}, {"confirmLive": True, "timeoutMs": 300})
+    assert caught.value.code in {"ACTION_UNSUPPORTED", "TARGET_NOT_FOUND", "TIMEOUT"}
+
+
+@pytest.mark.asyncio
+async def test_message_requires_specific_conversation(page):
+    await page.goto("https://x.com/home")
+    with pytest.raises(ActionError) as caught:
+        await XActions().message.replyConversation(page, {"text": "hello"}, {"confirmLive": True})
+    assert caught.value.code == "PAGE_UNSUPPORTED"
