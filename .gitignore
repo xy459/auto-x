@@ -1,0 +1,12 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+config/accounts.json
+config/accounts.json*.bak
+config/secrets.json
+logs/

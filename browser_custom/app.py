@@ -1,0 +1,34 @@
+"""FastAPI application assembly."""
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+from .api import router
+from .browser import session_registry
+from .config import PROJECT_ROOT, store
+
+load_dotenv(PROJECT_ROOT / ".env")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    store.reload()
+    yield
+    await session_registry.close_all(store.accounts.accounts)
+
+
+app = FastAPI(
+    title="browser-custom",
+    version="0.1.0",
+    description="CloakBrowser + Playwright persistent profile manager",
+    lifespan=lifespan,
+)
+app.include_router(router)
+app.mount("/", StaticFiles(directory=str(PROJECT_ROOT / "browser_custom" / "web"), html=True), name="web")
+

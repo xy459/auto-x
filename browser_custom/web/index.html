@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Browser Custom</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Browser Custom</h1>
+        <p>CloakBrowser + Playwright persistent profile 管理</p>
+      </div>
+      <button id="refresh">刷新状态</button>
+    </header>
+
+    <section>
+      <h2>全局设置</h2>
+      <div class="grid two">
+        <label>CloakBrowser 路径<input id="globalBrowserPath" placeholder="D:\cloakbrowser-windows-x64"></label>
+        <label>账户目录基路径<input id="globalUserBase" placeholder="D:\browser-custom\profiles"></label>
+      </div>
+      <label class="global-extensions">全局插件目录（每行一个绝对路径）
+        <textarea id="globalExtensionPaths" rows="4" placeholder="/absolute/path/to/unpacked-extension"></textarea>
+        <small>支持自研或第三方已解压插件；目录中必须包含 manifest.json。保存后在账户下次打开或批量重启时生效。</small>
+      </label>
+      <button id="saveSettings">保存全局设置</button>
+      <span id="settingsMsg" class="message"></span>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <h2>浏览器账户</h2>
+        <div class="account-tools">
+          <span id="selectionCount">已选择 0 个</span>
+          <button id="batchOpen" disabled>批量打开</button>
+          <button id="batchClose" class="ghost" disabled>批量关闭</button>
+          <button id="batchRestart" class="ghost" disabled>批量重启</button>
+          <button id="addAccount">新增账户</button>
+        </div>
+      </div>
+      <p id="batchMsg" class="batch-message" aria-live="polite"></p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th class="select-column"><input type="checkbox" id="selectAll" aria-label="选择全部账户"></th><th>账户</th><th><span class="status-heading">状态 <button type="button" id="statusRefresh" class="table-refresh">刷新</button></span></th><th>代理</th><th>进程/内存</th><th>操作</th></tr></thead>
+          <tbody id="accounts"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="accountDialog">
+    <form method="dialog" id="accountForm">
+      <div class="section-title"><h2 id="formTitle">新增账户</h2><button type="button" id="closeDialog" class="ghost">关闭</button></div>
+      <div class="grid two">
+        <label>名称<input id="name" required></label>
+        <label>用户数据目录<input id="userDataDir" required></label>
+        <label>账户浏览器路径<input id="browserPath" placeholder="留空使用全局路径"></label>
+        <label>拟人预设<select id="humanPreset"><option value="careful">careful</option><option value="default">default</option></select></label>
+      </div>
+
+      <fieldset class="identity-card">
+        <legend>网络与地区身份</legend>
+        <div class="identity-heading">
+          <label class="inline-check"><input type="checkbox" id="useProxy"> 使用代理</label>
+          <label class="inline-check"><input type="checkbox" id="strictProxy" checked> 代理或身份解析失败时禁止启动</label>
+        </div>
+        <div id="proxyFields" class="grid three compact-grid">
+          <label class="span-two">代理服务器<input id="proxyServer" placeholder="socks5://host:port 或 http://host:port"></label>
+          <label>用户名<input id="proxyUsername" autocomplete="username" placeholder="可选"></label>
+          <label>密码<input id="proxyPassword" type="password" autocomplete="new-password" placeholder="可选"></label>
+          <label id="clearPasswordLabel" class="inline-check subtle hidden"><input type="checkbox" id="clearProxyPassword"> 清除已保存密码</label>
+          <small id="proxyPasswordHint" class="span-two field-hint"></small>
+        </div>
+
+        <div class="grid three compact-grid">
+          <label>地区匹配
+            <select id="regionMode">
+              <option value="auto">自动匹配出口 IP（推荐）</option>
+              <option value="manual">完全手动设置</option>
+              <option value="disabled">不设置地区信息</option>
+            </select>
+          </label>
+          <label>时区
+            <span class="override-label"><input type="checkbox" id="timezoneOverrideEnabled"> 自定义覆盖</span>
+            <input id="timezoneOverride" list="timezoneOptions" placeholder="America/Los_Angeles">
+          </label>
+          <label>语言
+            <span class="override-label"><input type="checkbox" id="localeOverrideEnabled"> 自定义覆盖</span>
+            <input id="localeOverride" list="localeOptions" placeholder="en-US">
+          </label>
+        </div>
+
+        <div class="identity-actions">
+          <button type="button" id="testNetwork">检测网络并预览身份</button>
+          <small>首次检测会下载约 70 MB 的 GeoIP 数据库；检测结果仅作预览，启动时会重新解析当前出口 IP。</small>
+        </div>
+        <div id="identityPreview" class="identity-preview empty-preview">尚未检测</div>
+      </fieldset>
+
+      <fieldset class="identity-card advanced-card">
+        <legend>网站定位（高级，可选）</legend>
+        <label class="inline-check"><input type="checkbox" id="geolocationEnabled"> 向已授权网站提供 Geolocation API 定位</label>
+        <div id="geolocationFields" class="grid three compact-grid">
+          <label>纬度<input id="geolocationLatitude" type="number" min="-90" max="90" step="any" placeholder="34.0522"></label>
+          <label>经度<input id="geolocationLongitude" type="number" min="-180" max="180" step="any" placeholder="-118.2437"></label>
+          <label>精度（米）<input id="geolocationAccuracy" type="number" min="1" step="1" value="5000"></label>
+        </div>
+        <small>这不是代理 GeoIP。默认关闭；启用后通过 Playwright geolocation + permission 提供网站定位。</small>
+      </fieldset>
+
+      <fieldset class="identity-card fingerprint-card">
+        <legend>设备指纹</legend>
+        <div class="fingerprint-summary">
+          <div>
+            <span>指纹策略</span>
+            <strong>自动生成一致身份（推荐）</strong>
+            <small>CloakBrowser 根据固定 seed 统一生成 GPU、CPU、内存、屏幕、Canvas、WebGL、音频和字体等身份。</small>
+          </div>
+          <div>
+            <span>设备平台</span>
+            <strong id="fingerprintPlatformSummary">自动匹配当前系统</strong>
+            <small id="fingerprintHostSummary">由 CloakBrowser 使用宿主系统的官方默认策略。</small>
+          </div>
+          <div>
+            <span>账户指纹</span>
+            <strong>固定身份</strong>
+            <small id="fingerprintSeedSummary">保存后由账户 ID 自动生成固定 seed。</small>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="identity-card browser-version-card">
+        <legend>浏览器版本</legend>
+        <div class="grid two compact-grid">
+          <label>发布通道<select id="releaseChannel"></select></label>
+          <label>精确版本锁定
+            <input id="browserVersion" inputmode="numeric" placeholder="留空自动，例如 145.0.7632.109.2">
+            <small>通常留空；填写后固定使用指定 CloakBrowser 二进制版本。</small>
+          </label>
+        </div>
+        <div id="browserInfo" class="browser-info loading">正在解析实际二进制版本…</div>
+        <small id="customBrowserPathHint" class="field-hint hidden">当前账户设置了自定义浏览器路径，该路径优先；上方版本信息仅表示 CloakBrowser 官方通道解析结果。</small>
+      </fieldset>
+
+      <details id="advancedFingerprint" class="advanced-fingerprint">
+        <summary>高级指纹覆盖</summary>
+        <div class="warning-box">
+          CloakBrowser 官方测试基于默认自动指纹配置。手动覆盖可能破坏平台、GPU、字体、User-Agent、Client Hints 与实际 Chromium 行为的一致性。
+        </div>
+        <div class="grid three compact-grid">
+          <label>平台 persona
+            <select id="fpPlatformOverride"></select>
+            <small>不仅是 UA，还会影响 navigator.platform 和 GPU 等平台身份。</small>
+          </label>
+          <label>UA-CH platformVersion
+            <input id="platformVersion" inputmode="numeric" placeholder="自动，例如 15.0.0">
+            <small>仅覆盖 Client Hints 的 platformVersion。</small>
+          </label>
+          <label>UA/CH brandVersion
+            <input id="brandVersion" inputmode="numeric" placeholder="自动，例如 146.0.0.0">
+            <small>仅覆盖 User-Agent 和 Client Hints 的浏览器版本。</small>
+          </label>
+        </div>
+        <p id="platformOverrideWarning" class="platform-warning hidden">当前宿主是 macOS。模拟 Windows 可能与本机字体、GPU 等环境不一致，增加被检测风险。</p>
+      </details>
+
+      <label>额外启动参数（每行一个）
+        <textarea id="cloakArgs" rows="4"></textarea>
+        <small>代理、地区身份和设备指纹参数由上方设置统一管理，不能在这里重复填写。</small>
+      </label>
+      <div class="checks">
+        <label><input type="checkbox" id="humanize" checked> humanize</label>
+        <label><input type="checkbox" id="headless"> headless</label>
+        <label><input type="checkbox" id="enabled" checked> enabled</label>
+      </div>
+      <div class="actions">
+        <button type="submit" value="default">保存</button>
+      </div>
+      <p id="formMsg" class="message"></p>
+      <datalist id="timezoneOptions"></datalist>
+      <datalist id="localeOptions"></datalist>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>

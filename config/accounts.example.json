@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 2,
+  "cloakBrowserPath": "D:\\cloakbrowser-windows-x64",
+  "cloakUserDataBase": "D:\\browser-custom\\profiles",
+  "extensionPaths": [
+    "D:\\browser-custom\\extensions\\my-extension"
+  ],
+  "accounts": [
+    {
+      "acc": "acc-demo",
+      "name": "演示账户",
+      "userDataDir": "D:\\browser-custom\\profiles\\acc-demo",
+      "browserPath": null,
+      "network": {
+        "proxy": {
+          "server": "socks5://127.0.0.1:1080",
+          "username": null
+        },
+        "regionMode": "auto",
+        "timezoneOverride": null,
+        "localeOverride": null,
+        "strictProxy": true,
+        "lastCheck": null
+      },
+      "geolocation": {
+        "enabled": false,
+        "latitude": null,
+        "longitude": null,
+        "accuracy": 5000
+      },
+      "fpPlatform": "auto",
+      "platformVersion": null,
+      "brandVersion": null,
+      "releaseChannel": "stable",
+      "browserVersion": null,
+      "cloakArgs": [],
+      "headless": false,
+      "humanize": true,
+      "humanPreset": "careful",
+      "enabled": true
+    }
+  ]
+}
