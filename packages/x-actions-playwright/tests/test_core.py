@@ -14,7 +14,7 @@ from x_actions_playwright.core import (
     parse_tweet_identity,
     relationship_state,
 )
-from x_actions_playwright.errors import ActionError
+from x_actions_playwright.errors import ActionError, CancellationSignalError
 
 
 @pytest.mark.parametrize(
@@ -54,3 +54,21 @@ async def test_cancellation_is_structured():
     with pytest.raises(ActionError) as caught:
         await cancellable_sleep(10, event)
     assert caught.value.code == "USER_CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_cancellable_sleep_propagates_cancellation_signal_exception():
+    class DeadlineReached(RuntimeError):
+        pass
+
+    class DeadlineSignal:
+        def is_set(self):
+            return False
+
+        async def wait(self):
+            await asyncio.sleep(0.01)
+            raise DeadlineReached("deadline")
+
+    with pytest.raises(CancellationSignalError) as caught:
+        await cancellable_sleep(1_000, DeadlineSignal())
+    assert isinstance(caught.value.reason, DeadlineReached)

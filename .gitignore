@@ -11,3 +11,4 @@ htmlcov/
 **/config/accounts.json*.bak
 **/config/secrets.json
 logs/
+apps/x-ops/data/

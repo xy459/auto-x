@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..cloak import region_label_for_timezone, resolve_launch_identity
 from ..config import Account, AccountsConfig
@@ -20,7 +20,11 @@ _LAUNCH_LOCK = asyncio.Lock()
 _PLAYWRIGHT_DISABLE_EXTENSIONS_ARG = "--disable-extensions"
 
 
-def _allow_profile_extensions(cloak_browser_module: Any) -> None:
+class _CloakBrowserModule(Protocol):
+    IGNORE_DEFAULT_ARGS: list[str]
+
+
+def _allow_profile_extensions(cloak_browser_module: _CloakBrowserModule) -> None:
     """Keep Playwright from disabling extensions stored in the persistent profile."""
     ignored = list(cloak_browser_module.IGNORE_DEFAULT_ARGS)
     if _PLAYWRIGHT_DISABLE_EXTENSIONS_ARG not in ignored:
@@ -47,14 +51,25 @@ class AccountSession:
         self.account = account
         self.config = config
         self.acc = account.acc
-        self._context = None
+        self._context: Any | None = None
         self._alive = False
         self._fingerprint: dict[str, Any] | None = None
 
     def is_alive(self) -> bool:
         return self._context is not None and self._alive
 
-    def _on_close(self, *_args) -> None:
+    @property
+    def context(self) -> Any:
+        """Return the live persistent context for in-process integrations."""
+        if not self.is_alive():
+            raise RuntimeError(f"账户浏览器未运行: {self.acc}")
+        return self._context
+
+    async def new_page(self) -> Any:
+        """Create a caller-owned page while keeping profile state in this context."""
+        return await self.context.new_page()
+
+    def _on_close(self, *_args: object) -> None:
         self._alive = False
         logger.info("%s browser context closed", self.acc)
 
@@ -90,7 +105,7 @@ class AccountSession:
             logger.info("%s removed stale browser processes: %s", self.acc, stale)
 
         executable = resolve_cloak_exe(self.account, self.config)
-        if executable and not Path(executable).exists():
+        if executable and not await asyncio.to_thread(Path(executable).exists):
             raise RuntimeError(f"CloakBrowser 二进制不存在: {executable}")
         extension_paths = _resolve_extension_paths(self.config)
         proxy = self.account.proxy_value
@@ -118,8 +133,8 @@ class AccountSession:
                     exc,
                 )
 
-        import cloakbrowser as cloak
-        import cloakbrowser.browser as cloak_browser
+        import cloakbrowser as cloak  # type: ignore[import-untyped]
+        import cloakbrowser.browser as cloak_browser  # type: ignore[import-untyped]
 
         # Playwright adds --disable-extensions by default. CloakBrowser 0.5.8
         # does not suppress it, so manually installed profile extensions appear
@@ -180,13 +195,14 @@ class AccountSession:
         }
         await self._capture_browser_fingerprint()
         self._alive = True
+        context = self._context
         try:
-            self._context.on("close", self._on_close)
+            context.on("close", self._on_close)
         except Exception:  # noqa: BLE001
             pass
         logger.info("%s CloakBrowser started (extensions=%d)", self.acc, len(extension_paths))
 
-    async def close(self) -> dict:
+    async def close(self) -> dict[str, Any]:
         context, self._context = self._context, None
         self._alive = False
         close_error: str | None = None

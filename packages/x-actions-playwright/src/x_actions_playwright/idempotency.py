@@ -7,6 +7,10 @@ from typing import Any, Protocol
 
 
 class IdempotencyStore(Protocol):
+    async def claim(self, key: str, value: dict[str, Any]) -> dict[str, Any] | None:
+        """Atomically reserve *key*, returning its existing value when already claimed."""
+        ...
+
     async def get(self, key: str) -> dict[str, Any] | None: ...
 
     async def put(self, key: str, value: dict[str, Any]) -> None: ...
@@ -21,10 +25,18 @@ class MemoryIdempotencyStore:
     _values: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
+    async def claim(self, key: str, value: dict[str, Any]) -> dict[str, Any] | None:
+        async with self._lock:
+            existing = self._values.get(key)
+            if existing is not None:
+                return dict(existing)
+            self._values[key] = {**value, "storedAt": datetime.now(UTC).isoformat()}
+            return None
+
     async def get(self, key: str) -> dict[str, Any] | None:
         async with self._lock:
             value = self._values.get(key)
-            return dict(value) if value else None
+            return dict(value) if value is not None else None
 
     async def put(self, key: str, value: dict[str, Any]) -> None:
         async with self._lock:

@@ -10,7 +10,7 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Self
 from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -60,9 +60,9 @@ def _server_without_credentials(value: str) -> tuple[str, str | None, str | None
 
 class ProxyConfig(BaseModel):
     server: str
-    username: Optional[str] = None
-    password: Optional[str] = Field(default=None, exclude=True, repr=False)
-    passwordRef: Optional[str] = None
+    username: str | None = None
+    password: str | None = Field(default=None, exclude=True, repr=False)
+    passwordRef: str | None = None
 
     @field_validator("server")
     @classmethod
@@ -77,7 +77,7 @@ class ProxyConfig(BaseModel):
 
     @field_validator("username", "password", "passwordRef", mode="before")
     @classmethod
-    def _empty_to_none(cls, value):
+    def _empty_to_none(cls, value: Any) -> Any:
         if isinstance(value, str):
             value = value.strip()
             return value or None
@@ -107,40 +107,40 @@ class ProxyConfig(BaseModel):
 
 
 class NetworkCheck(BaseModel):
-    exitIp: Optional[str] = None
-    timezone: Optional[str] = None
-    locale: Optional[str] = None
-    detectedTimezone: Optional[str] = None
-    detectedLocale: Optional[str] = None
-    appliedTimezone: Optional[str] = None
-    appliedLocale: Optional[str] = None
-    timezoneSource: Optional[Literal["auto", "custom"]] = None
-    localeSource: Optional[Literal["auto", "custom"]] = None
-    webrtcIp: Optional[str] = None
-    checkedAt: Optional[datetime] = None
-    proxySignature: Optional[str] = None
-    latencyMs: Optional[int] = None
+    exitIp: str | None = None
+    timezone: str | None = None
+    locale: str | None = None
+    detectedTimezone: str | None = None
+    detectedLocale: str | None = None
+    appliedTimezone: str | None = None
+    appliedLocale: str | None = None
+    timezoneSource: Literal["auto", "custom"] | None = None
+    localeSource: Literal["auto", "custom"] | None = None
+    webrtcIp: str | None = None
+    checkedAt: datetime | None = None
+    proxySignature: str | None = None
+    latencyMs: int | None = None
     stale: bool = False
 
 
 class NetworkConfig(BaseModel):
-    proxy: Optional[ProxyConfig] = None
+    proxy: ProxyConfig | None = None
     regionMode: Literal["auto", "manual", "disabled"] = "auto"
-    timezoneOverride: Optional[str] = None
-    localeOverride: Optional[str] = None
+    timezoneOverride: str | None = None
+    localeOverride: str | None = None
     strictProxy: bool = True
-    lastCheck: Optional[NetworkCheck] = None
+    lastCheck: NetworkCheck | None = None
 
     @field_validator("timezoneOverride", "localeOverride", mode="before")
     @classmethod
-    def _empty_to_none(cls, value):
+    def _empty_to_none(cls, value: Any) -> Any:
         if isinstance(value, str):
             value = value.strip()
             return value or None
         return value
 
     @model_validator(mode="after")
-    def _manual_requires_identity(self):
+    def _manual_requires_identity(self) -> Self:
         if self.regionMode == "manual" and (not self.timezoneOverride or not self.localeOverride):
             raise ValueError("手动地区模式必须同时设置时区和语言")
         if self.regionMode == "disabled" and (self.timezoneOverride or self.localeOverride):
@@ -150,12 +150,12 @@ class NetworkConfig(BaseModel):
 
 class GeolocationConfig(BaseModel):
     enabled: bool = False
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    latitude: float | None = None
+    longitude: float | None = None
     accuracy: float = 5000
 
     @model_validator(mode="after")
-    def _valid_coordinates(self):
+    def _valid_coordinates(self) -> Self:
         if self.enabled and (self.latitude is None or self.longitude is None):
             raise ValueError("启用网站定位时必须填写经纬度")
         if self.latitude is not None and not -90 <= self.latitude <= 90:
@@ -171,15 +171,15 @@ class Account(BaseModel):
     acc: str
     name: str = ""
     userDataDir: str
-    browserPath: Optional[str] = None
+    browserPath: str | None = None
 
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     geolocation: GeolocationConfig = Field(default_factory=GeolocationConfig)
     fpPlatform: Literal["auto", "windows", "macos"] = "auto"
-    platformVersion: Optional[str] = None
-    brandVersion: Optional[str] = None
+    platformVersion: str | None = None
+    brandVersion: str | None = None
     releaseChannel: Literal["stable", "preview"] = "stable"
-    browserVersion: Optional[str] = None
+    browserVersion: str | None = None
     cloakArgs: list[str] = Field(default_factory=list)
 
     headless: bool = False
@@ -196,12 +196,12 @@ class Account(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_legacy_network(cls, value):
+    def _migrate_legacy_network(cls, value: Any) -> Any:
         if not isinstance(value, dict) or "network" in value:
             return value
         payload = dict(value)
         proxy_value = payload.get("proxy")
-        proxy = None
+        proxy: dict[str, str | None] | None = None
         if isinstance(proxy_value, str) and proxy_value.strip():
             server, username, password = _server_without_credentials(proxy_value.strip())
             proxy = {"server": server, "username": username, "password": password}
@@ -234,7 +234,7 @@ class Account(BaseModel):
         "browserPath", "platformVersion", "brandVersion", "browserVersion", mode="before"
     )
     @classmethod
-    def _empty_to_none(cls, value):
+    def _empty_to_none(cls, value: Any) -> Any:
         if isinstance(value, str):
             value = value.strip()
             return value or None
@@ -242,7 +242,7 @@ class Account(BaseModel):
 
     @field_validator("fpPlatform", mode="before")
     @classmethod
-    def _normalize_platform(cls, value):
+    def _normalize_platform(cls, value: Any) -> str:
         normalized = str(value or "").strip().lower()
         if normalized in {"", "auto", "default"}:
             return "auto"
@@ -254,21 +254,21 @@ class Account(BaseModel):
 
     @field_validator("platformVersion")
     @classmethod
-    def _valid_platform_version(cls, value: Optional[str]) -> Optional[str]:
+    def _valid_platform_version(cls, value: str | None) -> str | None:
         if value and not re.fullmatch(r"\d+(?:\.\d+){1,2}", value):
             raise ValueError("系统版本格式应为 major.minor 或 major.minor.patch")
         return value
 
     @field_validator("brandVersion")
     @classmethod
-    def _valid_brand_version(cls, value: Optional[str]) -> Optional[str]:
+    def _valid_brand_version(cls, value: str | None) -> str | None:
         if value and not re.fullmatch(r"\d+(?:\.\d+){3}", value):
             raise ValueError("UA/CH 浏览器版本格式应为四段数字，例如 146.0.0.0")
         return value
 
     @field_validator("browserVersion")
     @classmethod
-    def _valid_browser_version(cls, value: Optional[str]) -> Optional[str]:
+    def _valid_browser_version(cls, value: str | None) -> str | None:
         if value and not re.fullmatch(r"\d+(?:\.\d+){3,4}", value):
             raise ValueError("CloakBrowser 精确版本格式应为四或五段数字")
         return value
@@ -288,7 +288,7 @@ class Account(BaseModel):
         return result
 
     @model_validator(mode="after")
-    def _absolute_paths(self):
+    def _absolute_paths(self) -> Self:
         if not Path(self.userDataDir).expanduser().is_absolute():
             raise ValueError(f"userDataDir 必须是绝对路径: {self.userDataDir}")
         if self.browserPath and not Path(self.browserPath).expanduser().is_absolute():
@@ -325,7 +325,7 @@ class AccountsConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_fingerprint_defaults(cls, value):
+    def _migrate_fingerprint_defaults(cls, value: Any) -> Any:
         """Migrate pre-v2 platform defaults without erasing real overrides."""
         if not isinstance(value, dict):
             return value
@@ -337,7 +337,7 @@ class AccountsConfig(BaseModel):
         if schema_version >= CURRENT_CONFIG_VERSION:
             return payload
 
-        migrated_accounts = []
+        migrated_accounts: list[Any] = []
         host_default = _default_fingerprint_platform()
         for raw_account in payload.get("accounts", []):
             if not isinstance(raw_account, dict):
@@ -365,7 +365,7 @@ class AccountsConfig(BaseModel):
 
     @field_validator("extensionPaths", mode="before")
     @classmethod
-    def _clean_extension_paths(cls, value):
+    def _clean_extension_paths(cls, value: Any) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -387,7 +387,7 @@ class AccountsConfig(BaseModel):
         return result
 
     @model_validator(mode="after")
-    def _unique_accounts(self):
+    def _unique_accounts(self) -> Self:
         ids: set[str] = set()
         dirs: dict[str, str] = {}
         for account in self.accounts:
@@ -414,7 +414,7 @@ class AccountsConfig(BaseModel):
         return [Path(os.path.abspath(os.path.expanduser(value))) for value in self.extensionPaths]
 
 
-def _atomic_write(path: Path, payload: dict) -> None:
+def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:

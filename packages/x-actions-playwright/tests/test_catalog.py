@@ -4,7 +4,6 @@ import pytest
 
 from x_actions_playwright import ACTION_CATEGORIES, ACTION_DEFINITIONS, XActions
 
-
 EXPECTED_ACTIONS = {
     "context.inspect", "context.selectPost",
     "timeline.open", "timeline.browse", "timeline.collect",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     store.reload()
     yield
     await session_registry.close_all(store.accounts.accounts)

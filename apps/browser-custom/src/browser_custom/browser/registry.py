@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
+from typing import Any
 
 from ..config import Account, AccountsConfig
+from .lease import BrowserPageLease
 from .procutil import kill_for_data_dir, process_stats_many
 from .session import AccountSession
+
+logger = logging.getLogger(__name__)
 
 
 class SessionRegistry:
@@ -25,27 +30,60 @@ class SessionRegistry:
     def is_running(self, acc: str) -> bool:
         return self.get(acc) is not None
 
+    async def _ensure_started_locked(self, account: Account, config: AccountsConfig) -> AccountSession:
+        previous = self._sessions.get(account.acc)
+        if previous:
+            if previous.is_alive():
+                return previous
+            # A manually closed Chromium context still owns the Playwright
+            # driver until its patched close() method runs. Reap it before
+            # replacing the registry entry with a new session.
+            self._sessions.pop(account.acc, None)
+            await previous.close()
+        session = self._session_factory(account, config)
+        self._sessions[account.acc] = session
+        try:
+            await session.start()
+        except BaseException:
+            self._sessions.pop(account.acc, None)
+            try:
+                await asyncio.shield(session.close())
+            except BaseException as cleanup_error:  # noqa: BLE001
+                logger.warning(
+                    "failed to clean up partially started browser session %s: %s",
+                    account.acc,
+                    cleanup_error,
+                )
+            raise
+        return session
+
     async def ensure_started(self, account: Account, config: AccountsConfig) -> AccountSession:
         async with self._lock(account.acc):
-            previous = self._sessions.get(account.acc)
-            if previous:
-                if previous.is_alive():
-                    return previous
-                # A manually closed Chromium context still owns the Playwright
-                # driver until its patched close() method runs. Reap it before
-                # replacing the registry entry with a new session.
-                self._sessions.pop(account.acc, None)
-                await previous.close()
-            session = self._session_factory(account, config)
-            self._sessions[account.acc] = session
-            try:
-                await session.start()
-            except BaseException:
-                self._sessions.pop(account.acc, None)
-                raise
-            return session
+            return await self._ensure_started_locked(account, config)
 
-    async def close(self, account: Account) -> dict:
+    async def acquire_page(self, account: Account, config: AccountsConfig) -> BrowserPageLease:
+        """Return an isolated task page inside the account persistent context."""
+        async with self._lock(account.acc):
+            browser_was_started = not bool(
+                (existing := self._sessions.get(account.acc)) and existing.is_alive()
+            )
+            session = await self._ensure_started_locked(account, config)
+            try:
+                page = await session.new_page()
+            except BaseException:
+                if browser_was_started:
+                    self._sessions.pop(account.acc, None)
+                    await asyncio.shield(session.close())
+                raise
+            return BrowserPageLease(
+                registry=self,
+                account=account,
+                session=session,
+                page=page,
+                browser_was_started=browser_was_started,
+            )
+
+    async def close(self, account: Account) -> dict[str, Any]:
         async with self._lock(account.acc):
             session = self._sessions.pop(account.acc, None)
             if session:
@@ -62,14 +100,17 @@ class SessionRegistry:
     async def close_all(self, accounts: list[Account]) -> None:
         by_id = {account.acc: account for account in accounts}
         for acc in list(self._sessions):
-            account = by_id.get(acc) or self._sessions[acc].account
+            session = self._sessions.get(acc)
+            if session is None:
+                continue
+            account = by_id.get(acc) or session.account
             try:
                 await self.close(account)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("failed to close browser session %s during close_all: %s", acc, exc)
 
-    def status(self, accounts: list[Account]) -> list[dict]:
-        result = []
+    def status(self, accounts: list[Account]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         stats_by_account = process_stats_many([account.data_dir for account in accounts])
         for account, stats in zip(accounts, stats_by_account, strict=True):
             session = self._sessions.get(account.acc)

@@ -183,10 +183,30 @@ POST   /api/cloak/network-test
 POST   /api/cloak/proxy-test          # 兼容旧客户端，返回同一组合检测结果
 ```
 
+## Task Runner 进程内集成
+
+Playwright `Page` 不能通过普通 JSON API 传输。与 Task Runner 部署在同一个 Python
+Worker 时，通过 `SessionRegistry.acquire_page()` 获取任务专用页面：
+
+```python
+lease = await session_registry.acquire_page(account, config)
+try:
+    page = lease.page
+    # 将 page 绑定到 x-actions-playwright
+finally:
+    await lease.release(close_browser=False)
+```
+
+每个 lease 创建独立任务 Page，并跟踪由该 Page 打开的 popup；释放时只关闭本次租约拥有的
+页面，不影响用户手动打开的其他标签页。传入 `close_browser=True` 时，释放页面后再关闭整个
+账户 persistent context。
+
 ## 测试
 
 ```bash
 pytest
+ruff check .
+mypy src
 ```
 
 单元测试不启动真实 CloakBrowser。Windows 真机验收还应覆盖：多账户并发、代理出口、指纹稳定性、

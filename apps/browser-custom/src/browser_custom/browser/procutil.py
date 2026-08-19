@@ -6,10 +6,16 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import TypedDict, cast
 
-import psutil
+import psutil  # type: ignore[import-untyped]
 
 IS_WINDOWS = sys.platform.startswith("win")
+
+
+class ProcessStats(TypedDict):
+    mainPids: list[int]
+    processCount: int
 
 
 def cloak_seed(acc: str) -> int:
@@ -33,7 +39,7 @@ def _is_main_process(cmdline: list[str]) -> bool:
     return not any(token.startswith("--type=") for token in cmdline)
 
 
-def process_stats_many(data_dirs: list[Path]) -> list[dict]:
+def process_stats_many(data_dirs: list[Path]) -> list[ProcessStats]:
     """Take one process-table snapshot and group Chromium trees by profile."""
     if not data_dirs:
         return []
@@ -48,7 +54,7 @@ def process_stats_many(data_dirs: list[Path]) -> list[dict]:
                 pid = int(process.info["pid"])
                 ppid = int(process.info.get("ppid") or 0)
                 children.setdefault(ppid, []).append(pid)
-                command = process.info["cmdline"] or []
+                command = cast(list[str], process.info["cmdline"] or [])
                 found = _cmdline_data_dir(command)
                 target = _norm(found) if found else None
                 if target in wanted and _is_main_process(command):
@@ -60,7 +66,7 @@ def process_stats_many(data_dirs: list[Path]) -> list[dict]:
         # Status refresh should degrade to "stopped" instead of failing the API.
         return [{"mainPids": [], "processCount": 0} for _path in data_dirs]
 
-    by_target: dict[str, dict] = {}
+    by_target: dict[str, ProcessStats] = {}
     for target in wanted:
         roots = main_pids[target]
         seen: set[int] = set()
@@ -115,5 +121,5 @@ def wait_for_exit(data_dir: Path, timeout: float = 3.0) -> list[int]:
     return find_main_pids_for(data_dir)
 
 
-def process_stats(data_dir: Path) -> dict:
+def process_stats(data_dir: Path) -> ProcessStats:
     return process_stats_many([data_dir])[0]

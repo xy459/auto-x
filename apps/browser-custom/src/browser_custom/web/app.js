@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const apiBase = window.location.pathname.startsWith("/browser-custom") ? "/browser-custom" : "";
 let editing = null;
 let accountCache = [];
 let selectedAccounts = new Set();
@@ -13,7 +14,7 @@ let options = {
 };
 
 async function api(path, init = {}) {
-  const response = await fetch(path, init);
+  const response = await fetch(`${apiBase}${path}`, init);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     let detail = body.detail || body;

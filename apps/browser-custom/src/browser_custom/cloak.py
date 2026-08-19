@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import sys
 import time
+from typing import Any, TypedDict, cast
 
 from .config import ProxyConfig
 
@@ -80,6 +81,12 @@ LOCALE_OPTIONS = [
 ]
 
 
+class LaunchIdentity(TypedDict):
+    timezone: str
+    locale: str
+    exitIp: str | None
+
+
 def default_platform() -> str:
     return "macos" if sys.platform == "darwin" else "windows"
 
@@ -119,13 +126,16 @@ def projected_user_agent(
 
 def browser_binary_info(
     release_channel: str = "stable", browser_version: str | None = None
-) -> dict:
+) -> dict[str, Any]:
     """Return the official resolved binary metadata with a stable public shape."""
-    import cloakbrowser
+    import cloakbrowser  # type: ignore[import-untyped]
 
-    info = cloakbrowser.binary_info(
-        release_channel=release_channel,
-        browser_version=browser_version,
+    info = cast(
+        dict[str, Any],
+        cloakbrowser.binary_info(
+            release_channel=release_channel,
+            browser_version=browser_version,
+        ),
     )
     return {
         "version": info.get("version"),
@@ -153,18 +163,21 @@ async def resolve_launch_identity(
     proxy: ProxyConfig | None,
     timezone_override: str | None = None,
     locale_override: str | None = None,
-) -> dict:
+) -> LaunchIdentity:
     """Resolve the final launch identity exactly once before Chromium starts."""
     import cloakbrowser
 
     try:
-        timezone, locale, exit_ip = await asyncio.to_thread(
-            cloakbrowser.maybe_resolve_geoip,
-            True,
-            proxy.cloak_value() if proxy else None,
-            timezone_override,
-            locale_override,
-            None,
+        timezone, locale, exit_ip = cast(
+            tuple[str | None, str | None, str | None],
+            await asyncio.to_thread(
+                cloakbrowser.maybe_resolve_geoip,
+                True,
+                proxy.cloak_value() if proxy else None,
+                timezone_override,
+                locale_override,
+                None,
+            ),
         )
     except ImportError as exc:
         raise RuntimeError(
@@ -182,19 +195,22 @@ async def probe_network_identity(
     proxy: ProxyConfig | None,
     timezone_override: str | None = None,
     locale_override: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Use CloakBrowser's own GeoIP path so diagnostics match real launches."""
     import cloakbrowser
 
     started = time.perf_counter()
     try:
-        timezone, locale, exit_ip = await asyncio.to_thread(
-            cloakbrowser.maybe_resolve_geoip,
-            True,
-            proxy.cloak_value() if proxy else None,
-            None,
-            None,
-            None,
+        timezone, locale, exit_ip = cast(
+            tuple[str | None, str | None, str | None],
+            await asyncio.to_thread(
+                cloakbrowser.maybe_resolve_geoip,
+                True,
+                proxy.cloak_value() if proxy else None,
+                None,
+                None,
+                None,
+            ),
         )
     except ImportError as exc:
         raise RuntimeError(

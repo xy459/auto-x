@@ -14,6 +14,8 @@ _FAILURE_DESCRIPTIONS = {
     "USER_CANCELLED": "Execution was cancelled before or during the action.",
     "CONTENT_MISMATCH": "Input is invalid or X did not accept the requested content.",
     "CONFIRMATION_REQUIRED": "A live write requires confirmLive=true.",
+    "IDEMPOTENCY_IN_PROGRESS": "Another execution currently owns the idempotency key.",
+    "IDEMPOTENCY_STATE_CONFLICT": "The idempotency key has an unsupported terminal state.",
     "ACTION_UNSUPPORTED": "The current X layout or target does not expose this action.",
     "PAGE_UNSUPPORTED": "The current page does not satisfy the action precondition.",
     "TARGET_NOT_FOUND": "The target post, comment, control, or editor is not in the current DOM.",
@@ -34,15 +36,18 @@ _FAILURE_DESCRIPTIONS = {
     "DRAFT_CONFLICT": "A non-empty draft would be overwritten.",
     "MEDIA_TOO_LARGE": "The selected media exceeds the local upload safety limit.",
     "SUBMISSION_REJECTED": "X explicitly rejected the submission.",
+    "SUBMISSION_RESULT_UNKNOWN": "A live write was triggered but its final state could not be confirmed.",
+    "BROWSER_CLOSED_DURING_RUN": "The caller-owned browser or page closed during the action.",
 }
-_RETRYABLE = {"STATE_UNKNOWN", "TIMEOUT", "ELEMENT_NOT_VISIBLE", "ELEMENT_BLOCKED", "PROFILE_LOAD_FAILED", "PROFILE_LOADING_TIMEOUT"}
+_RETRYABLE = {"IDEMPOTENCY_IN_PROGRESS", "STATE_UNKNOWN", "TIMEOUT", "ELEMENT_NOT_VISIBLE", "ELEMENT_BLOCKED", "PROFILE_LOAD_FAILED", "PROFILE_LOADING_TIMEOUT"}
 
-BASE = ("UNEXPECTED_ERROR", "USER_CANCELLED")
+BASE = ("UNEXPECTED_ERROR", "USER_CANCELLED", "BROWSER_CLOSED_DURING_RUN", "TIMEOUT")
 TARGET = BASE + ("TARGET_NOT_FOUND", "TARGET_UNSAFE", "STATE_UNKNOWN")
 CLICK = TARGET + ("ELEMENT_NOT_VISIBLE", "ELEMENT_DISABLED", "ELEMENT_BLOCKED", "TIMEOUT")
-WRITE = BASE + ("CONFIRMATION_REQUIRED",) + CLICK[2:]
+WRITE = BASE + ("CONFIRMATION_REQUIRED", "IDEMPOTENCY_IN_PROGRESS", "IDEMPOTENCY_STATE_CONFLICT") + CLICK[len(BASE) :]
 COMPOSER = BASE + (
-    "CONFIRMATION_REQUIRED", "CONTENT_MISMATCH", "DRAFT_CONFLICT", "SUBMISSION_REJECTED",
+    "CONFIRMATION_REQUIRED", "IDEMPOTENCY_IN_PROGRESS", "IDEMPOTENCY_STATE_CONFLICT",
+    "CONTENT_MISMATCH", "DRAFT_CONFLICT", "SUBMISSION_REJECTED",
     "TARGET_NOT_FOUND", "ELEMENT_NOT_VISIBLE", "ELEMENT_DISABLED", "ELEMENT_BLOCKED", "TIMEOUT",
 )
 
@@ -144,7 +149,15 @@ def _schema(action_id: str, target: str) -> tuple[dict[str, Any], dict[str, Any]
 def _definition(spec: tuple[Any, ...]) -> ActionDefinition:
     action_id, label, handler, access, retry, target, idem, req_tweet, req_comment, deprecated, replaced, codes, edge = spec
     input_schema, output_schema = _schema(action_id, target)
-    failures = tuple(FailureMode(code, _FAILURE_DESCRIPTIONS[code], code in _RETRYABLE) for code in dict.fromkeys(codes))
+    failures = tuple(
+        FailureMode(
+            code,
+            _FAILURE_DESCRIPTIONS[code],
+            code in _RETRYABLE and retry == "safe",
+            access == "write" and code in {"BROWSER_CLOSED_DURING_RUN", "TIMEOUT", "UNEXPECTED_ERROR"},
+        )
+        for code in dict.fromkeys(codes)
+    )
     return ActionDefinition(
         id=action_id,
         category=action_id.split(".", 1)[0],

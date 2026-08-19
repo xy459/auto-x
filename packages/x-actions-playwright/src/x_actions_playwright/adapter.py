@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, cast
 from urllib.parse import quote, urlparse
+from weakref import WeakKeyDictionary
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core import (
     cancellable_sleep,
@@ -106,9 +108,26 @@ POST_EXTRACT_JS = r"""
 """
 
 
+def _normalized_media_path(value: object) -> str:
+    return os.path.abspath(os.path.expanduser(str(value)))
+
+
 class XAdapter:
     def __init__(self) -> None:
-        self.selected_tweet_id: str | None = None
+        self._selected_tweet_ids: WeakKeyDictionary[Any, str] = WeakKeyDictionary()
+        self._fallback_selected_tweet_ids: dict[int, str] = {}
+
+    def get_selected_tweet_id(self, page: Page) -> str | None:
+        try:
+            return self._selected_tweet_ids.get(page)
+        except TypeError:
+            return self._fallback_selected_tweet_ids.get(id(page))
+
+    def _set_selected_tweet_id(self, page: Page, tweet_id: str) -> None:
+        try:
+            self._selected_tweet_ids[page] = tweet_id
+        except TypeError:
+            self._fallback_selected_tweet_ids[id(page)] = tweet_id
 
     async def dispatch(
         self,
@@ -118,17 +137,18 @@ class XAdapter:
         options: ExecutionOptions,
     ) -> dict[str, Any]:
         method = getattr(self, handler, None)
-        if not method:
+        if not callable(method):
             raise ActionError("ACTION_UNSUPPORTED", f"No Playwright implementation for handler {handler}.")
-        return await method(page, payload, options)
+        return cast(dict[str, Any], await method(page, payload, options))
 
-    async def _count(self, locator: Locator) -> int:
-        return int(await locator.count())
-
-    async def _visible(self, locator: Locator) -> bool:
-        return bool(await locator.count() and await locator.first.is_visible())
-
-    async def _click(self, locator: Locator, description: str, options: ExecutionOptions) -> None:
+    async def _click(
+        self,
+        locator: Locator,
+        description: str,
+        options: ExecutionOptions,
+        *,
+        mutation: bool = False,
+    ) -> None:
         try:
             target = locator.first
             if not await target.count():
@@ -138,6 +158,12 @@ class XAdapter:
             if not await target.is_enabled():
                 raise ActionError("ELEMENT_DISABLED", f"{description} is disabled.")
             await target.scroll_into_view_if_needed(timeout=options.timeout_ms)
+            if mutation:
+                # Complete Playwright actionability checks without dispatching
+                # an input event. From the following point a failed/cancelled
+                # call may have triggered the external write.
+                await target.click(timeout=options.timeout_ms, trial=True)
+                options.trace.mark_mutation_triggered()
             await target.click(timeout=options.timeout_ms)
         except ActionError:
             raise
@@ -148,7 +174,7 @@ class XAdapter:
             raise normalized from error
 
     def _tweet_locator(self, page: Page, tweet_id: str | None) -> Locator:
-        target = str(tweet_id or self.selected_tweet_id or "")
+        target = str(tweet_id or self.get_selected_tweet_id(page) or "")
         articles = page.locator('article[data-testid="tweet"]')
         if not target:
             return articles.first
@@ -157,7 +183,10 @@ class XAdapter:
     async def _require_tweet(self, page: Page, tweet_id: Any) -> Locator:
         article = self._tweet_locator(page, str(tweet_id or ""))
         if not await article.count():
-            raise ActionError("TARGET_NOT_FOUND", f"Post {tweet_id or self.selected_tweet_id or ''} is not in the current DOM.")
+            raise ActionError(
+                "TARGET_NOT_FOUND",
+                f"Post {tweet_id or self.get_selected_tweet_id(page) or ''} is not in the current DOM.",
+            )
         return article
 
     async def _owned_control(self, article: Locator, test_ids: tuple[str, ...]) -> Locator:
@@ -170,7 +199,7 @@ class XAdapter:
         return candidates.nth(10_000)
 
     async def _post(self, article: Locator, *, include_ads: bool = False) -> dict[str, Any]:
-        raw = await article.evaluate(POST_EXTRACT_JS, {})
+        raw = cast(dict[str, Any] | None, await article.evaluate(POST_EXTRACT_JS, {}))
         if not raw:
             raise ActionError("STATE_UNKNOWN", "Could not identify the selected post.")
         if raw.get("isAd") and not include_ads:
@@ -210,12 +239,12 @@ class XAdapter:
                 tweets.append({"tweetId": post["postId"], "url": post["url"], "author": post["author"]["username"], "isAd": post["isAd"]})
             except ActionError:
                 continue
-        return {"status": "success", "context": {"pageType": classify_page(page.url), "url": page.url, "title": await page.title(), "account": account, "tweets": tweets, "selectedTweetId": self.selected_tweet_id}}
+        return {"status": "success", "context": {"pageType": classify_page(page.url), "url": page.url, "title": await page.title(), "account": account, "tweets": tweets, "selectedTweetId": self.get_selected_tweet_id(page)}}
 
     async def select_post(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         article = await self._require_tweet(page, payload.get("tweetId"))
         post = await self._post(article, include_ads=True)
-        self.selected_tweet_id = post["postId"]
+        self._set_selected_tweet_id(page, post["postId"])
         await article.scroll_into_view_if_needed(timeout=options.timeout_ms)
         await article.evaluate("el => { el.dataset.xActionsSelected='true'; el.style.outline='3px solid #1d9bf0'; el.style.outlineOffset='3px'; }")
         return {"status": "success", "tweet": post}
@@ -246,10 +275,10 @@ class XAdapter:
         try:
             names = ["For you", "为你推荐", "推荐"] if feed == "for-you" else ["Following", "正在关注", "关注"]
             await page.wait_for_function("names => [...document.querySelectorAll('[role=tab]')].some(t => t.getAttribute('aria-selected') === 'true' && names.includes((t.innerText||t.textContent||'').trim()))", arg=names, timeout=options.timeout_ms)
-        except Exception:
+        except Exception as error:
             current = self._timeline_tab(page, feed)
             if not await current.count() or await current.get_attribute("aria-selected") != "true":
-                raise ActionError("TIMEOUT", f"Timed out verifying {feed} tab selection.", retryable=True)
+                raise ActionError("TIMEOUT", f"Timed out verifying {feed} tab selection.", retryable=True) from error
         return {"status": "success", "timeline": feed, "evidence": ["aria-selected:false->true"]}
 
     async def timeline_browse(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
@@ -398,15 +427,15 @@ class XAdapter:
         confirmation = page.locator('[data-testid="confirmationSheetConfirm"]')
         if not await confirmation.count():
             confirmation = page.get_by_role("dialog").get_by_role("button", name=re.compile(r"^(Delete|删除|刪除)$", re.I))
-        await self._click(confirmation, "Delete confirmation", options)
+        await self._click(confirmation, "Delete confirmation", options, mutation=True)
         try:
             await article.wait_for(state="detached", timeout=min(options.timeout_ms, 10_000))
             return {"status": "success", "tweetId": str(tweet_id), "deleted": True, "evidence": ["post-removed"]}
-        except Exception:
+        except Exception as error:
             toast = page.locator('[data-testid="toast"]')
             text = await toast.inner_text() if await toast.count() else ""
             if re.search(r"failed|error|try again|出错|失败", text, re.I):
-                raise ActionError("SUBMISSION_REJECTED", "X rejected the post deletion.", {"toast": text})
+                raise ActionError("SUBMISSION_REJECTED", "X rejected the post deletion.", {"toast": text}) from error
             return {"status": "uncertain", "tweetId": str(tweet_id), "deleted": None, "reason": "Delete confirmation was clicked but the final state could not be proven. Do not retry automatically."}
 
     async def post_exit_details(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
@@ -587,8 +616,8 @@ class XAdapter:
                 return {"status": "success", "comment": await self._comment_data(article, root_id)}
         raise ActionError("TARGET_NOT_FOUND", f"Comment {comment_id} is not visible before Discover more.")
 
-    async def _comment_article(self, page: Page, comment_id: Any) -> Locator:
-        await self.comment_get(page, {"commentId": comment_id}, ExecutionOptions())
+    async def _comment_article(self, page: Page, comment_id: Any, options: ExecutionOptions) -> Locator:
+        await self.comment_get(page, {"commentId": comment_id}, options)
         return await self._require_tweet(page, comment_id)
 
     async def _state_action(
@@ -609,9 +638,14 @@ class XAdapter:
         if options.dry_run:
             return {"status": "success", "dryRun": True, "wouldExecute": action, "target": post}
         control = await self._owned_control(article, click_test_ids)
-        await self._click(control, f"{action} button", options)
+        await self._click(
+            control,
+            f"{action} button",
+            options,
+            mutation=menu_confirm is None,
+        )
         if menu_confirm is not None:
-            await self._click(menu_confirm, f"{action} confirmation", options)
+            await self._click(menu_confirm, f"{action} confirmation", options, mutation=True)
         try:
             await (await self._owned_control(article, (desired_test_id,))).wait_for(state="visible", timeout=min(options.timeout_ms, 7000))
             return {"status": "success", "target": await self._post(article, include_ads=True), "evidence": [f"state:{current_test_id}->{desired_test_id}"]}
@@ -619,11 +653,11 @@ class XAdapter:
             return {"status": "uncertain", "target": post, "reason": f"{action} was clicked but the final target state was not observed. Do not retry automatically."}
 
     async def comment_like(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
-        article = await self._comment_article(page, payload.get("commentId"))
+        article = await self._comment_article(page, payload.get("commentId"), options)
         return await self._state_action(page, article, options, action="comment.like", current_test_id="like", desired_test_id="unlike", click_test_ids=("like",))
 
     async def comment_unlike(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
-        article = await self._comment_article(page, payload.get("commentId"))
+        article = await self._comment_article(page, payload.get("commentId"), options)
         return await self._state_action(page, article, options, action="comment.unlike", current_test_id="unlike", desired_test_id="like", click_test_ids=("unlike",))
 
     async def _open_fresh_composer(self, page: Page, trigger: Locator, options: ExecutionOptions, *, kind: str) -> Locator:
@@ -666,7 +700,7 @@ class XAdapter:
     async def _submit_composer(self, page: Page, editor: Locator, button: Locator, text: str, options: ExecutionOptions, action: str) -> dict[str, Any]:
         if options.dry_run:
             return {"status": "success", "dryRun": True, "wouldExecute": action, "contentHash": hash_text(text)}
-        await self._click(button, f"{action} submit", options)
+        await self._click(button, f"{action} submit", options, mutation=True)
         toast = page.locator('[data-testid="toast"]')
         try:
             await asyncio.sleep(0.2)
@@ -685,14 +719,27 @@ class XAdapter:
         return {"status": "uncertain", "contentHash": hash_text(text), "reason": "The final submit control was clicked but X did not expose a reliable final state. Do not retry automatically."}
 
     async def comment_reply(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
-        article = await self._comment_article(page, payload.get("commentId"))
+        article = await self._comment_article(page, payload.get("commentId"), options)
+        text = str(payload.get("text") or "")
         trigger = await self._owned_control(article, ("reply",))
+        if options.dry_run:
+            if not text.strip():
+                raise ActionError("CONTENT_MISMATCH", "Composer text is empty.")
+            if not await trigger.count():
+                raise ActionError("TARGET_NOT_FOUND", "Comment reply control was not found.")
+            return {"status": "success", "dryRun": True, "wouldExecute": "comment.reply", "contentHash": hash_text(text)}
         editor = await self._open_fresh_composer(page, trigger, options, kind="comment reply")
-        _, button = await self._prepare_composer(page, editor, str(payload.get("text") or ""), options)
-        return await self._submit_composer(page, editor, button, str(payload["text"]), options, "comment.reply")
+        _, button = await self._prepare_composer(page, editor, text, options)
+        return await self._submit_composer(page, editor, button, text, options, "comment.reply")
 
     async def _quote(self, page: Page, article: Locator, text: str, options: ExecutionOptions, action: str) -> dict[str, Any]:
         repost = await self._owned_control(article, ("retweet", "unretweet"))
+        if options.dry_run:
+            if not text.strip():
+                raise ActionError("CONTENT_MISMATCH", "Composer text is empty.")
+            if not await repost.count():
+                raise ActionError("TARGET_NOT_FOUND", "Quote control was not found.")
+            return {"status": "success", "dryRun": True, "wouldExecute": action, "contentHash": hash_text(text)}
         await self._click(repost, f"{action} repost menu", options)
         quote_item = page.get_by_role("menuitem", name=re.compile(r"^(Quote|引用|引用帖子)$", re.I))
         editor = await self._open_fresh_composer(page, quote_item, options, kind=action)
@@ -700,7 +747,7 @@ class XAdapter:
         return await self._submit_composer(page, editor, button, text, options, action)
 
     async def comment_quote(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
-        return await self._quote(page, await self._comment_article(page, payload.get("commentId")), str(payload.get("text") or ""), options, "comment.quote")
+        return await self._quote(page, await self._comment_article(page, payload.get("commentId"), options), str(payload.get("text") or ""), options, "comment.quote")
 
     async def comment_delete_reply(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         if not payload.get("replyId"):
@@ -709,10 +756,17 @@ class XAdapter:
 
     async def interaction_reply(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         article = await self._require_tweet(page, payload.get("tweetId"))
+        text = str(payload.get("text") or "")
         trigger = await self._owned_control(article, ("reply",))
+        if options.dry_run:
+            if not text.strip():
+                raise ActionError("CONTENT_MISMATCH", "Composer text is empty.")
+            if not await trigger.count():
+                raise ActionError("TARGET_NOT_FOUND", "Post reply control was not found.")
+            return {"status": "success", "dryRun": True, "wouldExecute": "interaction.reply", "contentHash": hash_text(text)}
         editor = await self._open_fresh_composer(page, trigger, options, kind="post reply")
-        _, button = await self._prepare_composer(page, editor, str(payload.get("text") or ""), options)
-        return await self._submit_composer(page, editor, button, str(payload["text"]), options, "interaction.reply")
+        _, button = await self._prepare_composer(page, editor, text, options)
+        return await self._submit_composer(page, editor, button, text, options, "interaction.reply")
 
     async def interaction_quote(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         return await self._quote(page, await self._require_tweet(page, payload.get("tweetId")), str(payload.get("text") or ""), options, "interaction.quote")
@@ -923,12 +977,17 @@ class XAdapter:
             return {"status": "skipped", "reason": f"Profile relationship is already {state}.", "username": username}
         if options.dry_run:
             return {"status": "success", "dryRun": True, "wouldExecute": "follow" if follow else "unfollow", "username": username}
-        await self._click(control, "Follow" if follow else "Unfollow", options)
+        await self._click(
+            control,
+            "Follow" if follow else "Unfollow",
+            options,
+            mutation=follow,
+        )
         if not follow:
             confirm = page.locator('[data-testid="confirmationSheetConfirm"]')
             if not await confirm.count():
                 confirm = page.get_by_role("dialog").get_by_role("button", name=re.compile(r"^(Unfollow|取消关注)$", re.I))
-            await self._click(confirm, "Unfollow confirmation", options)
+            await self._click(confirm, "Unfollow confirmation", options, mutation=True)
         try:
             deadline = asyncio.get_running_loop().time() + min(options.timeout_ms, 7000) / 1000
             while asyncio.get_running_loop().time() < deadline:
@@ -970,11 +1029,12 @@ class XAdapter:
         paths: list[str] = []
         total = 0
         for item in media:
-            path = Path(str(item.get("path") if isinstance(item, dict) else item)).expanduser()
-            if not path.is_file():
+            raw_path = item.get("path") if isinstance(item, dict) else item
+            path = await asyncio.to_thread(_normalized_media_path, raw_path)
+            if not await asyncio.to_thread(os.path.isfile, path):
                 raise ActionError("CONTENT_MISMATCH", f"Media file does not exist: {path}")
-            total += path.stat().st_size
-            paths.append(str(path))
+            total += await asyncio.to_thread(os.path.getsize, path)
+            paths.append(path)
         if total > 40 * 1024 * 1024:
             raise ActionError("MEDIA_TOO_LARGE", "Media exceeds the 40 MB upload safety limit.", {"totalBytes": total})
         surface = editor.locator("xpath=ancestor::*[.//input[@type='file' and @data-testid='fileInput']][1]")
@@ -1002,16 +1062,196 @@ class XAdapter:
             raise ActionError("CONTENT_MISMATCH", "X did not enable the Post button after native Playwright input.")
         return await self._submit_composer(page, editor, button, text, options, "publish.post")
 
+    async def _schedule_wall_time(self, page: Page, scheduled: datetime) -> tuple[datetime, str]:
+        timezone_name = str(
+            await page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+            or ""
+        )
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as error:
+            raise ActionError(
+                "STATE_UNKNOWN",
+                "The browser Profile timezone could not be resolved.",
+                {"timezone": timezone_name},
+            ) from error
+
+        if scheduled.tzinfo is not None:
+            return scheduled.astimezone(timezone), timezone_name
+
+        # A timestamp without an offset is explicitly interpreted as Profile
+        # wall time. Reject DST gaps and folds rather than scheduling at a
+        # silently shifted or ambiguous instant.
+        candidates = (
+            scheduled.replace(tzinfo=timezone, fold=0),
+            scheduled.replace(tzinfo=timezone, fold=1),
+        )
+        valid = [
+            candidate
+            for candidate in candidates
+            if candidate.astimezone(UTC).astimezone(timezone).replace(tzinfo=None)
+            == scheduled
+        ]
+        if not valid:
+            raise ActionError(
+                "INVALID_SCHEDULE_TIME",
+                "The requested Profile-local time does not exist because of daylight saving time.",
+                {"timezone": timezone_name, "scheduleAt": scheduled.isoformat()},
+            )
+        if len({candidate.utcoffset() for candidate in valid}) > 1:
+            raise ActionError(
+                "INVALID_SCHEDULE_TIME",
+                "The requested Profile-local time is ambiguous because of daylight saving time.",
+                {"timezone": timezone_name, "scheduleAt": scheduled.isoformat()},
+            )
+        return valid[0], timezone_name
+
+    async def _schedule_control_kind(self, control: Locator) -> str | None:
+        metadata = cast(
+            dict[str, str],
+            await control.evaluate(
+                r"""el => {
+                  const labelled = (el.getAttribute('aria-labelledby') || '')
+                    .split(/\s+/).filter(Boolean)
+                    .map(id => document.getElementById(id)?.textContent || '').join(' ');
+                  return {
+                    text: [el.getAttribute('aria-label') || '', el.name || '', el.id || '',
+                      [...(el.labels || [])].map(label => label.textContent || '').join(' '), labelled]
+                      .join(' ').toLowerCase()
+                  };
+                }"""
+            ),
+        )
+        text = metadata.get("text", "")
+        patterns = (
+            ("meridiem", r"\b(am|pm|meridiem)\b|上午|下午"),
+            ("minute", r"\bminute(s)?\b|分钟|分鐘|分$"),
+            ("hour", r"\bhour(s)?\b|小时|小時|时$|時$"),
+            ("year", r"\byear\b|年份|年$"),
+            ("month", r"\bmonth\b|月份|月$"),
+            ("day", r"\bday\b|\bdate\b|日期|日$"),
+        )
+        return next((kind for kind, pattern in patterns if re.search(pattern, text, re.I)), None)
+
+    async def _select_schedule_number(
+        self, control: Locator, value: int, field: str
+    ) -> None:
+        options = cast(
+            list[dict[str, str]],
+            await control.locator("option").evaluate_all(
+                "els => els.map(el => ({value: el.value, text: (el.textContent || '').trim()}))"
+            ),
+        )
+        selected: str | None = None
+        for option in options:
+            for candidate in (option["value"], option["text"]):
+                match = re.fullmatch(r"\s*0*(\d+)\s*", candidate)
+                if match and int(match.group(1)) == value:
+                    selected = option["value"]
+                    break
+            if selected is not None:
+                break
+        if selected is None:
+            raise ActionError(
+                "ACTION_UNSUPPORTED",
+                f"The X schedule {field} control does not contain the requested value.",
+                {"field": field, "value": value},
+            )
+        await control.select_option(value=selected)
+        if await control.input_value() != selected:
+            raise ActionError("STATE_UNKNOWN", f"X did not retain the selected schedule {field}.")
+
+    async def _select_schedule_meridiem(self, control: Locator, value: str) -> None:
+        wanted = "am" if value == "AM" else "pm"
+        pattern = r"\bam\b|上午" if wanted == "am" else r"\bpm\b|下午"
+        options = cast(
+            list[dict[str, str]],
+            await control.locator("option").evaluate_all(
+                "els => els.map(el => ({value: el.value, text: (el.textContent || '').trim()}))"
+            ),
+        )
+        selected = next(
+            (
+                option["value"]
+                for option in options
+                if re.search(pattern, f"{option['value']} {option['text']}", re.I)
+            ),
+            None,
+        )
+        if selected is None:
+            raise ActionError(
+                "ACTION_UNSUPPORTED",
+                "The X schedule dialog exposes a 12-hour clock without a recognizable AM/PM option.",
+            )
+        await control.select_option(value=selected)
+        if await control.input_value() != selected:
+            raise ActionError("STATE_UNKNOWN", "X did not retain the selected schedule AM/PM value.")
+
+    async def _fill_schedule_controls(self, dialog: Locator, scheduled: datetime) -> None:
+        selects = dialog.locator("select")
+        count = await selects.count()
+        if count not in {5, 6}:
+            raise ActionError("ACTION_UNSUPPORTED", "X schedule controls have an unsupported structure.")
+
+        controls: dict[str, Locator] = {}
+        for index in range(count):
+            control = selects.nth(index)
+            kind = await self._schedule_control_kind(control)
+            if kind:
+                if kind in controls:
+                    raise ActionError(
+                        "ACTION_UNSUPPORTED",
+                        f"X schedule dialog contains multiple {kind} controls.",
+                    )
+                controls[kind] = control
+
+        if not controls:
+            # Compatibility fallback for the stable X layout when labels are
+            # temporarily absent. The six-control layout adds AM/PM last.
+            order = ["month", "day", "year", "hour", "minute"]
+            if count == 6:
+                order.append("meridiem")
+            controls = {kind: selects.nth(index) for index, kind in enumerate(order)}
+
+        required = {"month", "day", "year", "hour", "minute"}
+        missing = sorted(required - controls.keys())
+        if missing:
+            raise ActionError(
+                "ACTION_UNSUPPORTED",
+                "X schedule controls could not be identified by their labels.",
+                {"missing": missing},
+            )
+
+        twelve_hour = "meridiem" in controls
+        hour = scheduled.hour % 12 or 12 if twelve_hour else scheduled.hour
+        await self._select_schedule_number(controls["month"], scheduled.month, "month")
+        await self._select_schedule_number(controls["day"], scheduled.day, "day")
+        await self._select_schedule_number(controls["year"], scheduled.year, "year")
+        await self._select_schedule_number(controls["hour"], hour, "hour")
+        await self._select_schedule_number(controls["minute"], scheduled.minute, "minute")
+        if twelve_hour:
+            await self._select_schedule_meridiem(
+                controls["meridiem"], "AM" if scheduled.hour < 12 else "PM"
+            )
+
     async def publish_schedule(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
-        scheduled = parse_schedule(payload.get("scheduleAt"))
-        now = datetime.now(scheduled.tzinfo or UTC)
-        if scheduled <= now + timedelta(minutes=1):
+        requested = parse_schedule(payload.get("scheduleAt"))
+        scheduled, timezone_name = await self._schedule_wall_time(page, requested)
+        if scheduled.astimezone(UTC) <= datetime.now(UTC) + timedelta(minutes=1):
             raise ActionError("INVALID_SCHEDULE_TIME", "Schedule time must be at least one minute in the future.")
         text = str(payload.get("text") or "")
         if not text.strip() and not payload.get("media"):
             raise ActionError("CONTENT_MISMATCH", "Post content is empty.")
         if options.dry_run:
-            return {"status": "success", "dryRun": True, "wouldExecute": "publish.schedule", "contentHash": hash_text(text), "scheduleAt": scheduled.isoformat()}
+            return {
+                "status": "success",
+                "dryRun": True,
+                "wouldExecute": "publish.schedule",
+                "contentHash": hash_text(text),
+                "scheduleAt": requested.isoformat(),
+                "profileScheduleAt": scheduled.isoformat(),
+                "profileTimezone": timezone_name,
+            }
         editor = await self._open_post_composer(page, options)
         existing = (await editor.inner_text()).strip()
         if existing:
@@ -1028,12 +1268,7 @@ class XAdapter:
             await dialog.wait_for(state="visible", timeout=options.timeout_ms)
         except Exception as error:
             raise ActionError("ACTION_UNSUPPORTED", "X schedule dialog did not expose a supported layout.") from error
-        selects = dialog.locator("select")
-        if await selects.count() not in {5, 6}:
-            raise ActionError("ACTION_UNSUPPORTED", "X schedule controls have an unsupported structure.")
-        values = [scheduled.month, scheduled.day, scheduled.year, scheduled.hour, scheduled.minute]
-        for index, value in enumerate(values):
-            await selects.nth(index).select_option(str(value))
+        await self._fill_schedule_controls(dialog, scheduled)
         confirm = dialog.locator('[data-testid="scheduledConfirmationPrimaryAction"]')
         await self._click(confirm, "schedule confirmation", options)
         _, final_button = await self._prepare_composer(page, editor, text, options) if text else (surface, surface.locator('[data-testid="tweetButton"], [data-testid="tweetButtonInline"]').first)
@@ -1057,16 +1292,21 @@ class XAdapter:
         existing = (await editor.inner_text()).strip()
         if existing:
             raise ActionError("DRAFT_CONFLICT", "Refusing to overwrite an existing chat draft.")
-        await editor.press_sequentially(text, delay=0, timeout=options.timeout_ms)
-        surface = editor.locator("xpath=ancestor::*[.//*[@data-testid='dm-composer-send-button' or @data-testid='dmComposerSendButton']][1]")
+        surface = editor.locator(
+            "xpath=ancestor::*[.//*[@data-testid='dm-composer-send-button' or "
+            "@data-testid='dmComposerSendButton']][1]"
+        )
         button = surface.locator('[data-testid="dm-composer-send-button"], [data-testid="dmComposerSendButton"]')
-        if not await button.count() or not await button.first.is_enabled():
-            raise ActionError("ACTION_UNSUPPORTED", "The chat composer did not expose an enabled local send button.")
+        if not await button.count():
+            raise ActionError("ACTION_UNSUPPORTED", "The chat composer did not expose a local send button.")
         if options.dry_run:
             return {"status": "success", "dryRun": True, "wouldExecute": "message.replyConversation", "contentHash": hash_text(text)}
-        await self._click(button, "chat send", options)
+        await editor.press_sequentially(text, delay=0, timeout=options.timeout_ms)
+        if not await button.first.is_enabled():
+            raise ActionError("ACTION_UNSUPPORTED", "The chat composer did not expose an enabled local send button.")
+        await self._click(button, "chat send", options, mutation=True)
         try:
             await page.wait_for_function("el => !(el?.innerText || '').trim()", arg=await editor.element_handle(), timeout=min(options.timeout_ms, 7000))
-            return {"status": "success", "evidence": ["chat-editor-cleared"], "contentHash": hash_text(text)}
+            return {"status": "uncertain", "evidence": ["chat-editor-cleared"], "reason": "The chat editor cleared, but no delivered outgoing message was proven. Do not retry automatically.", "contentHash": hash_text(text)}
         except Exception:
             return {"status": "uncertain", "reason": "The chat send button was clicked but the final state was not proven. Do not retry automatically.", "contentHash": hash_text(text)}

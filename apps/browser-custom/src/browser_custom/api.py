@@ -5,8 +5,8 @@ import os
 import re
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ValidationError
@@ -16,6 +16,8 @@ from .browser import session_registry
 from .config import Account, AccountsConfig, ProxyConfig, store
 
 router = APIRouter(prefix="/api")
+
+JsonObject = dict[str, Any]
 
 
 class SettingsUpdate(BaseModel):
@@ -29,9 +31,9 @@ class BrowserBatchRequest(BaseModel):
     accounts: list[str]
 
 
-def _validation_errors(exc: ValidationError) -> list[dict]:
+def _validation_errors(exc: ValidationError) -> list[JsonObject]:
     """Return JSON-safe Pydantic details (ctx may contain raw ValueError objects)."""
-    return exc.errors(include_context=False)
+    return [dict(item) for item in exc.errors(include_context=False)]
 
 
 def _new_acc_id() -> str:
@@ -42,7 +44,7 @@ def _new_acc_id() -> str:
             return candidate
 
 
-def _public_account(account: Account) -> dict:
+def _public_account(account: Account) -> JsonObject:
     data = account.model_dump()
     proxy = account.network.proxy
     if proxy:
@@ -71,10 +73,12 @@ def _resolved_browser_versions(accounts: list[Account]) -> dict[str, str | None]
     return result
 
 
-def _fingerprint_summary(account: Account, runtime: dict, browser_version: str | None) -> dict:
+def _fingerprint_summary(
+    account: Account, runtime: JsonObject, browser_version: str | None
+) -> JsonObject:
     runtime_fingerprint = runtime.get("fingerprint") or None
     if runtime_fingerprint:
-        fingerprint = dict(runtime_fingerprint)
+        fingerprint: JsonObject = dict(runtime_fingerprint)
     elif account.network.regionMode == "disabled":
         fingerprint = {
             "source": "disabled", "webrtcIp": None, "region": None,
@@ -110,7 +114,9 @@ def _fingerprint_summary(account: Account, runtime: dict, browser_version: str |
     return fingerprint
 
 
-def _prepare_account_payload(body: dict, acc: str, existing: Account | None = None) -> dict:
+def _prepare_account_payload(
+    body: JsonObject, acc: str, existing: Account | None = None
+) -> JsonObject:
     """Merge write-only proxy passwords without ever returning them to the UI."""
     payload = deepcopy(body)
     payload["acc"] = acc
@@ -130,7 +136,7 @@ def _prepare_account_payload(body: dict, acc: str, existing: Account | None = No
         and str(proxy.get("server") or "").strip() == old_proxy.server
         and str(proxy.get("username") or "").strip() == (old_proxy.username or "")
     )
-    if not password_supplied and same_identity:
+    if not password_supplied and same_identity and old_proxy is not None:
         proxy["password"] = old_proxy.password
         proxy["passwordRef"] = old_proxy.passwordRef
     elif password:
@@ -170,12 +176,12 @@ def _save_accounts(accounts: list[Account], *, browser_path: str | None = None,
 
 
 @router.get("/health")
-def health():
+def health() -> JsonObject:
     return {"ok": True, "architecture": "cloakbrowser-playwright-persistent"}
 
 
 @router.get("/settings")
-def settings():
+def settings() -> JsonObject:
     return {
         "cloakBrowserPath": store.accounts.cloakBrowserPath,
         "cloakUserDataBase": store.accounts.cloakUserDataBase,
@@ -184,7 +190,7 @@ def settings():
 
 
 @router.put("/settings")
-def update_settings(body: SettingsUpdate):
+def update_settings(body: SettingsUpdate) -> JsonObject:
     if any(session_registry.is_running(account.acc) for account in store.accounts.accounts):
         raise HTTPException(409, "有浏览器正在运行，请全部关闭后再修改全局设置")
     _save_accounts(store.accounts.accounts, browser_path=body.cloakBrowserPath,
@@ -194,7 +200,7 @@ def update_settings(body: SettingsUpdate):
 
 
 @router.get("/accounts")
-def list_accounts():
+def list_accounts() -> JsonObject:
     statuses = {item["acc"]: item for item in session_registry.status(store.accounts.accounts)}
     browser_versions = _resolved_browser_versions(store.accounts.accounts)
     return {
@@ -212,7 +218,7 @@ def list_accounts():
 
 
 @router.post("/accounts")
-def add_account(body: dict):
+def add_account(body: JsonObject) -> JsonObject:
     acc = _new_acc_id()
     payload = _prepare_account_payload(body, acc)
     try:
@@ -225,7 +231,7 @@ def add_account(body: dict):
 
 
 @router.put("/accounts/{acc}")
-def update_account(acc: str, body: dict):
+def update_account(acc: str, body: JsonObject) -> JsonObject:
     index = next((i for i, account in enumerate(store.accounts.accounts) if account.acc == acc), None)
     if index is None:
         raise HTTPException(404, f"未知账户: {acc}")
@@ -244,7 +250,7 @@ def update_account(acc: str, body: dict):
 
 
 @router.delete("/accounts/{acc}")
-async def delete_account(acc: str):
+async def delete_account(acc: str) -> JsonObject:
     account = store.accounts.get(acc)
     if account is None:
         raise HTTPException(404, f"未知账户: {acc}")
@@ -254,11 +260,11 @@ async def delete_account(acc: str):
 
 
 @router.get("/browser/status")
-def browser_status():
+def browser_status() -> JsonObject:
     return {"accounts": session_registry.status(store.accounts.accounts)}
 
 
-async def _run_browser_action(account: Account, action: str) -> dict:
+async def _run_browser_action(account: Account, action: str) -> JsonObject:
     if action == "open":
         await session_registry.ensure_started(account, store.accounts)
         return {"running": True}
@@ -271,9 +277,9 @@ async def _run_browser_action(account: Account, action: str) -> dict:
 
 
 @router.post("/browser/batch")
-async def browser_batch_action(body: BrowserBatchRequest):
-    results = []
-    seen = set()
+async def browser_batch_action(body: BrowserBatchRequest) -> JsonObject:
+    results: list[JsonObject] = []
+    seen: set[str] = set()
     for acc in body.accounts:
         if acc in seen:
             continue
@@ -295,7 +301,7 @@ async def browser_batch_action(body: BrowserBatchRequest):
 
 
 @router.post("/browser/{acc}/{action}")
-async def browser_action(acc: str, action: str):
+async def browser_action(acc: str, action: str) -> JsonObject:
     account = store.accounts.get(acc)
     if account is None:
         raise HTTPException(404, f"未知账户: {acc}")
@@ -303,12 +309,12 @@ async def browser_action(acc: str, action: str):
         return {"ok": True, **await _run_browser_action(account, action)}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
 
 
 @router.get("/cloak/options")
-def cloak_options():
+def cloak_options() -> JsonObject:
     return {
         "platforms": cloak.PLATFORM_OPTIONS,
         "defaultPlatform": cloak.default_platform(),
@@ -327,7 +333,7 @@ def cloak_options():
 def cloak_browser_info(
     releaseChannel: Literal["stable", "preview"] = "stable",
     browserVersion: str | None = None,
-):
+) -> JsonObject:
     browser_version = (browserVersion or "").strip() or None
     if browser_version and not re.fullmatch(r"\d+(?:\.\d+){3,4}", browser_version):
         raise HTTPException(400, "CloakBrowser 精确版本格式应为四或五段数字")
@@ -335,11 +341,11 @@ def cloak_browser_info(
         return cloak.browser_binary_info(releaseChannel, browser_version)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(502, f"无法解析 CloakBrowser 二进制信息: {exc}") from exc
 
 
-def _probe_proxy(body: dict) -> tuple[ProxyConfig | None, str | None, str | None]:
+def _probe_proxy(body: JsonObject) -> tuple[ProxyConfig | None, str | None, str | None]:
     # Backward-compatible string payload for older clients.
     if isinstance(body.get("proxy"), str):
         raw = str(body["proxy"]).strip()
@@ -350,7 +356,8 @@ def _probe_proxy(body: dict) -> tuple[ProxyConfig | None, str | None, str | None
         })
         return account.network.proxy, None, None
 
-    network = body.get("network") or {}
+    network_value = body.get("network")
+    network: JsonObject = network_value if isinstance(network_value, dict) else {}
     proxy_data = deepcopy(network.get("proxy"))
     proxy = None
     if isinstance(proxy_data, dict):
@@ -367,18 +374,26 @@ def _probe_proxy(body: dict) -> tuple[ProxyConfig | None, str | None, str | None
             if same_identity:
                 proxy_data["password"] = old_proxy.password
         proxy = ProxyConfig.model_validate(proxy_data)
-    return proxy, network.get("timezoneOverride") or None, network.get("localeOverride") or None
+    timezone_value = network.get("timezoneOverride")
+    locale_value = network.get("localeOverride")
+    return (
+        proxy,
+        str(timezone_value) if timezone_value else None,
+        str(locale_value) if locale_value else None,
+    )
 
 
 @router.post("/cloak/network-test")
 @router.post("/cloak/proxy-test")
-async def proxy_test(body: dict):
+async def proxy_test(body: JsonObject) -> JsonObject:
     try:
         proxy, timezone_override, locale_override = _probe_proxy(body)
-        result = await cloak.probe_network_identity(proxy, timezone_override, locale_override)
-        result["checkedAt"] = datetime.now(timezone.utc).isoformat()
+        result = await cloak.probe_network_identity(
+            proxy, timezone_override, locale_override
+        )
+        result["checkedAt"] = datetime.now(UTC).isoformat()
         return result
     except ValidationError as exc:
         raise HTTPException(400, _validation_errors(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(502, str(exc)) from exc

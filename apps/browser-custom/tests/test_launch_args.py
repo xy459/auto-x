@@ -1,9 +1,9 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from browser_custom.browser import procutil
 from browser_custom.browser.launch_args import build_cloak_args, resolve_cloak_exe
 from browser_custom.browser.procutil import cloak_seed
-from browser_custom.browser import procutil
 from browser_custom.browser.session import _allow_profile_extensions
 from browser_custom.config import Account, AccountsConfig
 

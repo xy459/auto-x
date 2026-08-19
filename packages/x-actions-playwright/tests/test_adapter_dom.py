@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from x_actions_playwright import ActionError, XActions
+from x_actions_playwright.adapter import XAdapter
 
 
 def tweet_html(post_id="100", username="alice", *, liked=False, quote=False, ad=False, own=False):
@@ -36,7 +40,7 @@ def tweet_html(post_id="100", username="alice", *, liked=False, quote=False, ad=
       <div id="share-menu" hidden><div role="menuitem" data-testid="copyLink" onclick="this.remove()">Copy link</div></div>
       <div id="delete-menu" hidden><div role="menuitem" onclick="document.querySelector('[data-testid=confirmationSheetConfirm]').hidden=false">Delete</div></div>
       <div role="dialog"><button data-testid="confirmationSheetConfirm" hidden onclick="document.querySelector('article').remove();this.closest('[role=dialog]').remove()">Delete</button></div>
-      {f'<div data-testid="SideNav_AccountSwitcher_Button">Alice\n@alice</div>' if own else ''}
+      {'<div data-testid="SideNav_AccountSwitcher_Button">Alice\n@alice</div>' if own else ''}
     """
 
 
@@ -70,6 +74,47 @@ async def test_dry_run_does_not_click_write_action(page):
     result = await XActions().interaction.like(page, {"tweetId": "100"}, {"dryRun": True})
     assert result.status == "success"
     assert await page.locator('article > button[data-testid="like"]').count() == 1
+
+
+@pytest.mark.asyncio
+async def test_selected_post_is_scoped_to_its_page(page):
+    await page.set_content(tweet_html(post_id="100"))
+    second = await page.context.new_page()
+    await second.set_content(tweet_html(post_id="200"))
+    actions = XActions()
+    await actions.context.selectPost(page, {"tweetId": "100"})
+    selected = await actions.post.getDetails(page)
+    assert selected.data["post"]["postId"] == "100"
+    with pytest.raises(ActionError) as caught:
+        await actions.post.getDetails(second)
+    assert caught.value.code == "TARGET_NOT_FOUND"
+    await second.close()
+
+
+@pytest.mark.asyncio
+async def test_reply_dry_run_does_not_open_or_mutate_composer(page):
+    await page.set_content(
+        tweet_html()
+        + """
+        <div id="composer" hidden>
+          <div data-testid="tweetTextarea_0" contenteditable="true"></div>
+          <button data-testid="tweetButton">Reply</button>
+        </div>
+        <script>
+          document.querySelector('article > [data-testid=reply]').onclick = () => {
+            document.querySelector('#composer').hidden = false;
+          };
+        </script>
+        """
+    )
+    result = await XActions().interaction.reply(
+        page,
+        {"tweetId": "100", "text": "dry run"},
+        {"dryRun": True},
+    )
+    assert result.status == "success"
+    assert await page.locator("#composer").is_hidden()
+    assert await page.locator('[data-testid="tweetTextarea_0"]').inner_text() == ""
 
 
 @pytest.mark.asyncio
@@ -159,8 +204,85 @@ async def test_publish_fails_closed_when_composer_layout_is_unsupported(page):
 
 
 @pytest.mark.asyncio
+async def test_schedule_dry_run_converts_absolute_time_to_profile_timezone(page):
+    timezone_name = await page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+    requested = datetime(2035, 8, 20, 13, 45, tzinfo=UTC)
+
+    result = await XActions().publish.schedule(
+        page,
+        {"text": "scheduled", "scheduleAt": requested.isoformat()},
+        {"dryRun": True},
+    )
+
+    expected = requested.astimezone(ZoneInfo(timezone_name))
+    assert result.data["profileTimezone"] == timezone_name
+    assert result.data["profileScheduleAt"] == expected.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_schedule_controls_support_labeled_24_hour_layout(page):
+    await page.set_content(
+        """
+        <div id="schedule">
+          <label>Year<select aria-label="Year"><option value="2035">2035</option></select></label>
+          <label>Month<select aria-label="Month"><option value="8">August</option></select></label>
+          <label>Day<select aria-label="Day"><option value="20">20</option></select></label>
+          <label>Minute<select aria-label="Minute"><option value="45">45</option></select></label>
+          <label>Hour<select aria-label="Hour"><option value="13">13</option></select></label>
+        </div>
+        """
+    )
+
+    await XAdapter()._fill_schedule_controls(
+        page.locator("#schedule"), datetime(2035, 8, 20, 13, 45)
+    )
+
+    assert await page.get_by_label("Hour").input_value() == "13"
+    assert await page.get_by_label("Minute").input_value() == "45"
+
+
+@pytest.mark.asyncio
+async def test_schedule_controls_support_labeled_12_hour_layout_and_pm(page):
+    await page.set_content(
+        """
+        <div id="schedule">
+          <label>Month<select aria-label="Month"><option value="8">August</option></select></label>
+          <label>Day<select aria-label="Day"><option value="20">20</option></select></label>
+          <label>Year<select aria-label="Year"><option value="2035">2035</option></select></label>
+          <label>Hour<select aria-label="Hour"><option value="1">1</option></select></label>
+          <label>Minute<select aria-label="Minute"><option value="45">45</option></select></label>
+          <label>AM/PM<select aria-label="AM/PM"><option value="am">AM</option><option value="pm">PM</option></select></label>
+        </div>
+        """
+    )
+
+    await XAdapter()._fill_schedule_controls(
+        page.locator("#schedule"), datetime(2035, 8, 20, 13, 45)
+    )
+
+    assert await page.get_by_label("Hour").input_value() == "1"
+    assert await page.get_by_label("AM/PM").input_value() == "pm"
+
+
+@pytest.mark.asyncio
 async def test_message_requires_specific_conversation(page):
     await page.goto("https://x.com/home")
     with pytest.raises(ActionError) as caught:
         await XActions().message.replyConversation(page, {"text": "hello"}, {"confirmLive": True})
     assert caught.value.code == "PAGE_UNSUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_message_dry_run_does_not_type(page):
+    await page.goto("https://x.com/i/chat/conversation-1")
+    await page.set_content(
+        """
+        <div>
+          <div contenteditable="true" role="textbox"></div>
+          <button data-testid="dm-composer-send-button">Send</button>
+        </div>
+        """
+    )
+    result = await XActions().message.replyConversation(page, {"text": "dry run"}, {"dryRun": True})
+    assert result.status == "success"
+    assert await page.get_by_role("textbox").inner_text() == ""

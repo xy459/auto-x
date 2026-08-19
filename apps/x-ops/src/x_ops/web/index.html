@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>X Ops 管理后台</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">X</span><div><strong>Ops Console</strong><small>任务管理后台</small></div></div>
+      <nav id="nav">
+        <button data-page="dashboard" class="active">概览</button>
+        <button data-page="accounts">账户与浏览器</button>
+        <button data-page="tasks">任务管理</button>
+        <button data-page="runs">运行记录</button>
+        <button data-page="programs">任务程序</button>
+        <button data-page="ai">AI 服务</button>
+        <button data-page="settings">系统设置</button>
+      </nav>
+      <div class="sidebar-note">浏览器状态、Task 状态与 TaskRun 状态分别展示，互不混用。</div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><h1 id="pageTitle">概览</h1><p id="pageSubtitle">任务运行和浏览器资源概况</p></div>
+        <button class="secondary" id="refreshPage">刷新</button>
+      </header>
+      <div id="flash" role="status"></div>
+
+      <section class="page active" id="page-dashboard">
+        <div class="cards" id="summaryCards"></div>
+        <div class="grid two">
+          <article class="panel"><div class="panel-head"><h2>当前正在运行</h2></div><div id="runningTable"></div></article>
+          <article class="panel"><div class="panel-head"><h2>最近异常</h2></div><div id="failureTable"></div></article>
+        </div>
+        <article class="panel"><div class="panel-head"><h2>即将执行</h2></div><div id="upcomingTable"></div></article>
+      </section>
+
+      <section class="page" id="page-accounts">
+        <article class="panel">
+          <div class="panel-head"><div><h2>账户列表</h2><p>浏览器生命周期来自 browser-custom，任务占用状态来自 x-ops。</p></div><div class="actions"><button type="button" onclick="window.location.href='/browser-custom/'">浏览器技术配置</button><button data-batch="open">批量打开</button><button data-batch="close" class="secondary">批量关闭</button><button data-batch="restart" class="secondary">批量重启</button></div></div>
+          <div id="accountsTable"></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-tasks">
+        <div class="grid task-layout">
+          <article class="panel">
+            <div class="panel-head"><div><h2>任务列表</h2><p>Task 是可重复运行的配置；状态仅为启用或停用。</p></div><button id="newTask">创建任务</button></div>
+            <div id="tasksTable"></div>
+          </article>
+          <article class="panel form-panel" id="taskEditor">
+            <div class="panel-head"><h2 id="taskFormTitle">创建任务</h2><button class="quiet" id="closeTaskEditor">关闭</button></div>
+            <form id="taskForm">
+              <input type="hidden" id="taskId">
+              <label>任务名称<input id="taskName" required maxlength="160"></label>
+              <label>任务说明<textarea id="taskDescription" rows="2"></textarea></label>
+              <label>任务程序<select id="taskProgram" required></select></label>
+              <div id="programHelp" class="help"></div>
+              <fieldset><legend>账户</legend><div id="taskAccounts" class="check-list"></div></fieldset>
+              <label>业务参数（JSON）<textarea id="taskParams" class="code" rows="10">{}</textarea></label>
+              <div id="schemaHelp" class="schema-help"></div>
+              <div class="grid two compact"><label>浏览器结束策略<select id="taskBrowserPolicy"><option value="keep_open">保持打开</option><option value="close">任务后关闭</option></select></label><label>Task 状态<select id="taskEnabled"><option value="true">启用</option><option value="false">停用</option></select></label></div>
+              <label>计划（JSON，可留空）<textarea id="taskSchedule" class="code" rows="3" placeholder='{"type":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai","enabled":true}'></textarea></label>
+              <div class="form-actions"><button type="submit">保存任务</button><button type="button" class="secondary" id="validateParams">校验参数</button></div>
+            </form>
+          </article>
+        </div>
+      </section>
+
+      <section class="page" id="page-runs">
+        <div class="grid run-layout">
+          <article class="panel"><div class="panel-head"><div><h2>运行记录</h2><p>TaskRun 只使用 queued、running、succeeded、failed、uncertain、cancelled。</p></div><select id="runStatusFilter"><option value="">全部状态</option><option>queued</option><option>running</option><option>succeeded</option><option>failed</option><option>uncertain</option><option>cancelled</option></select></div><div id="runsTable"></div></article>
+          <article class="panel run-detail" id="runDetail"><div class="empty">选择一条运行查看参数、输出、错误和日志。</div></article>
+        </div>
+      </section>
+
+      <section class="page" id="page-programs">
+        <article class="panel"><div class="panel-head"><div><h2>已部署任务程序</h2><p>只读目录。任务程序通过代码、测试和部署更新，后台不在线编辑代码。</p></div></div><div id="programCards" class="program-grid"></div></article>
+      </section>
+
+      <section class="page" id="page-ai">
+        <div class="grid two">
+          <article class="panel"><div class="panel-head"><h2>模型配置</h2></div><form id="aiForm"><label>Provider<input id="aiProvider" value="openai"></label><label>API 地址<input id="aiBaseUrl" placeholder="https://api.openai.com/v1"></label><label>API Key<input id="aiApiKey" type="password" placeholder="留空表示保留现有密钥"></label><label>默认模型<input id="aiModel"></label><label>请求超时（秒）<input id="aiTimeout" type="number" min="1" max="300"></label><div class="form-actions"><button type="submit">保存配置</button><button type="button" class="secondary" id="testAI">测试连接</button></div><p id="aiKeyState" class="help"></p></form></article>
+          <article class="panel"><div class="panel-head"><h2>提示词模板</h2><button id="newTemplate" class="secondary">新建模板</button></div><div id="templatesList"></div><form id="templateForm" class="subform hidden"><label>模板 ID<input id="templateId" required pattern="[A-Za-z0-9_.-]+"></label><label>名称<input id="templateName" required></label><label>系统提示词<textarea id="templateSystem" rows="3"></textarea></label><label>用户提示词<textarea id="templateUser" rows="5" required></textarea></label><label>变量（逗号分隔）<input id="templateVariables"></label><button type="submit">保存模板</button></form></article>
+        </div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <div class="grid two">
+          <article class="panel"><div class="panel-head"><h2>运行设置</h2></div><form id="runtimeForm"><label>最大同时运行浏览器任务数<input id="maxConcurrent" type="number" min="1" max="100"></label><label>取消检查间隔（秒）<input id="cancelPoll" type="number" min="0.1" step="0.1"></label><label>默认任务超时（秒）<input id="taskTimeout" type="number" min="30"></label><label>浏览器准备超时（秒）<input id="browserAcquireTimeout" type="number" min="5" max="1800"></label><label>默认浏览器结束策略<select id="defaultBrowserPolicy"><option value="keep_open">保持打开</option><option value="close">任务后关闭</option></select></label><label>任务日志保留天数<input id="logRetention" type="number" min="1"></label><label>队列轮询间隔（秒）<input id="queuePoll" type="number" min="0.1" step="0.1"></label><button type="submit">保存运行设置</button></form></article>
+          <article class="panel"><div class="panel-head"><h2>服务状态</h2></div><div id="serviceStatus"></div></article>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

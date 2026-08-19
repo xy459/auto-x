@@ -1,12 +1,41 @@
 from __future__ import annotations
 
-import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Protocol
 
 ActionStatus = Literal["success", "skipped", "navigating", "uncertain", "cancelled", "failed"]
 Access = Literal["read", "write"]
 RetryPolicy = Literal["safe", "never"]
+
+
+class CancellationSignal(Protocol):
+    def is_set(self) -> bool: ...
+
+    async def wait(self) -> bool: ...
+
+
+ArtifactHook = Callable[..., Awaitable[object] | object]
+
+
+@dataclass(slots=True)
+class ExecutionTrace:
+    """Per-call write progress used to classify failures without guessing."""
+
+    dispatch_started: bool = False
+    mutation_triggered: bool = False
+    postcondition_verified: bool = False
+
+    def mark_dispatch_started(self) -> None:
+        self.dispatch_started = True
+
+    def mark_mutation_triggered(self) -> None:
+        self.mutation_triggered = True
+
+    def mark_postcondition_verified(self) -> None:
+        if not self.mutation_triggered:
+            raise RuntimeError("A postcondition cannot be verified before a mutation is triggered.")
+        self.postcondition_verified = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,10 +93,11 @@ class ExecutionOptions:
     confirm_live: bool = False
     idempotency_key: str | None = None
     timeout_ms: int = 10_000
-    cancellation: asyncio.Event | None = None
+    cancellation: CancellationSignal | None = None
     account_scope: str | None = None
     capture_failure: bool = False
-    artifact_hook: Any | None = None
+    artifact_hook: ArtifactHook | None = None
+    trace: ExecutionTrace = field(default_factory=ExecutionTrace, repr=False)
 
 
 @dataclass(slots=True)
@@ -82,15 +112,3 @@ class ActionResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-@dataclass(slots=True)
-class WorkflowStep:
-    action: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    options: dict[str, Any] = field(default_factory=dict)
-    retries: int = 0
-    delay_after_ms: int = 0
-    when: Any | None = None
-    continue_on_uncertain: bool = False
-    continue_on_navigating: bool = False

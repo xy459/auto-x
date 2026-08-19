@@ -4,12 +4,11 @@ import asyncio
 import hashlib
 import re
 from datetime import datetime
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from .errors import ActionError
-
-T = TypeVar("T")
+from .errors import ActionError, CancellationSignalError
+from .models import CancellationSignal
 
 
 def clamp_number(value: Any, fallback: float, minimum: float, maximum: float) -> float:
@@ -123,42 +122,36 @@ def relationship_state(test_id: str = "", aria: str = "") -> str:
     return "unknown"
 
 
-async def cancellable_sleep(milliseconds: int, cancellation: asyncio.Event | None = None) -> None:
+async def cancellable_sleep(milliseconds: int, cancellation: CancellationSignal | None = None) -> None:
     if cancellation and cancellation.is_set():
-        raise ActionError("USER_CANCELLED", "Execution was cancelled.")
+        try:
+            cancelled = await cancellation.wait()
+        except BaseException as exc:
+            raise CancellationSignalError(exc) from exc
+        if cancelled:
+            raise ActionError("USER_CANCELLED", "Execution was cancelled.")
     sleep_task = asyncio.create_task(asyncio.sleep(max(0, milliseconds) / 1000))
     if not cancellation:
         await sleep_task
         return
-    cancel_task = asyncio.create_task(cancellation.wait())
-    done, pending = await asyncio.wait({sleep_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
-    for task in pending:
-        task.cancel()
-    if cancel_task in done and cancellation.is_set():
-        raise ActionError("USER_CANCELLED", "Execution was cancelled.")
 
-
-async def wait_for(
-    check: Callable[[], Awaitable[T | None]],
-    *,
-    timeout_ms: int = 10_000,
-    interval_ms: int = 120,
-    description: str = "condition",
-    cancellation: asyncio.Event | None = None,
-) -> T:
-    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
-    last_error: BaseException | None = None
-    while asyncio.get_running_loop().time() < deadline:
-        if cancellation and cancellation.is_set():
-            raise ActionError("USER_CANCELLED", f"Cancelled while waiting for {description}.")
+    async def wait_for_cancellation() -> bool:
         try:
-            result = await check()
-            if result is not None and result is not False:
-                return result
-        except Exception as error:  # polling tolerates transient detached nodes
-            last_error = error
-        await cancellable_sleep(interval_ms, cancellation)
-    raise ActionError("TIMEOUT", f"Timed out waiting for {description}.", {"cause": str(last_error) if last_error else None})
+            return await cancellation.wait()
+        except BaseException as exc:
+            raise CancellationSignalError(exc) from exc
+
+    cancel_task = asyncio.create_task(wait_for_cancellation())
+    try:
+        done, pending = await asyncio.wait({sleep_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        pending = {task for task in (sleep_task, cancel_task) if not task.done()}
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    if cancel_task in done:
+        if cancel_task.result():
+            raise ActionError("USER_CANCELLED", "Execution was cancelled.")
 
 
 def parse_schedule(value: Any) -> datetime:
