@@ -31,6 +31,21 @@ class Params(BaseModel):
     max_likes: int = Field(default=10, ge=1, le=100)
 
 
+# 完整执行流程：
+# Runner 校验参数并准备浏览器
+#   → like_posts.run()
+#   → 检查取消状态并初始化统计值
+#   → run_timeline_batches()
+#   → 收集当前可见帖子，排除广告并按帖子 ID 去重
+#   → 按目标作者和关键词匹配帖子
+#   → 获取匹配帖子的 ID 并累计 matched
+#   → interaction.like()
+#   → 已点赞则跳过，否则点击点赞并确认按钮变为已点赞状态
+#   → 根据结果累计 liked 或 skipped
+#   → 未达到 max_likes 时滚动一次并处理下一批帖子
+#   → 达到点赞上限、滚动上限、页面底部或取消状态时结束
+#   → 返回 posts_seen、matched、liked 和 skipped
+#   → Runner 保存成功、失败、不确定或取消状态
 async def run(context: TaskContext, params: Params) -> dict[str, Any]:
     await context.cancellation.raise_if_cancelled()
     matched = liked = skipped = 0

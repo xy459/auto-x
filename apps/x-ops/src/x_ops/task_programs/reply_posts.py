@@ -41,6 +41,24 @@ class Params(BaseModel):
         return self
 
 
+# 完整执行流程：
+# Runner 校验参数并准备浏览器
+#   → reply_posts.run()
+#   → 检查取消状态并初始化统计值
+#   → run_timeline_batches()
+#   → 收集当前可见帖子，排除广告并按帖子 ID 去重
+#   → 按目标作者和关键词匹配帖子
+#   → 获取匹配帖子的 ID 并累计 matched
+#   → fixed 模式读取固定回复，ai 模式根据帖子正文和作者生成回复
+#   → 再次检查取消状态
+#   → interaction.reply()
+#   → 打开独立回复编辑器，填入并核对文本后发送
+#   → 根据 X 的可靠反馈确认成功；无法确认时标记为不确定且不自动重试
+#   → 根据结果累计 replied 或 skipped
+#   → 未达到 max_replies 时滚动一次并处理下一批帖子
+#   → 达到回复上限、滚动上限、页面底部或取消状态时结束
+#   → 返回 posts_seen、matched、replied 和 skipped
+#   → Runner 保存成功、失败、不确定或取消状态
 async def run(context: TaskContext, params: Params) -> dict[str, Any]:
     await context.cancellation.raise_if_cancelled()
     matched = replied = skipped = 0
