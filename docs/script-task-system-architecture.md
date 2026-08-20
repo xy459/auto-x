@@ -3,7 +3,7 @@
 > 状态：架构已确认，作为当前实现依据
 > 日期：2026-08-20
 > 适用范围：基于 CloakBrowser、Playwright 和 X/Twitter 原子动作的多账户任务系统
-> 关联文档：[Task Runner 详细处理流程](task-runner-processing-design.md) · [管理后台功能与组织设计](admin-console-design.md) · [冻结的可视化工作流方案](visual-workflow-engine-design.md)
+> 关联文档：[Task Runner 详细处理流程](task-runner-processing-design.md) · [AI 生成任务程序工作流](ai-task-program-generation-workflow.md) · [管理后台功能与组织设计](admin-console-design.md) · [冻结的可视化工作流方案](visual-workflow-engine-design.md)
 
 ## 1. 设计结论
 
