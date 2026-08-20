@@ -267,8 +267,17 @@ class XAdapter:
             await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=options.timeout_ms)
             return {"status": "navigating", "url": "https://x.com/home", "requiresRetry": True, "requestedTimeline": feed}
         tab = self._timeline_tab(page, feed)
-        if not await tab.count():
-            raise ActionError("TARGET_NOT_FOUND", f"Could not find the {feed} Home tab.")
+        try:
+            # X renders the Home tabs client-side after DOMContentLoaded. A task
+            # page can therefore already be at /home while the requested tab is
+            # still absent from the DOM. Wait for it instead of failing the
+            # immediate retry performed by the task program.
+            await tab.wait_for(state="visible", timeout=options.timeout_ms)
+        except Exception as error:
+            raise ActionError(
+                "TARGET_NOT_FOUND",
+                f"Could not find the {feed} Home tab.",
+            ) from error
         if await tab.get_attribute("aria-selected") == "true":
             return {"status": "skipped", "reason": f"{feed} is already selected.", "timeline": feed, "evidence": ["aria-selected=true"]}
         await self._click(tab, f"{feed} Home tab", options)

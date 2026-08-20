@@ -192,6 +192,27 @@ async def test_timeline_open_selects_requested_tab(page):
 
 
 @pytest.mark.asyncio
+async def test_timeline_open_waits_for_home_tabs_to_render(page):
+    await page.set_content("""
+      <div id="tabs"></div>
+      <script>
+        setTimeout(() => {
+          document.querySelector('#tabs').innerHTML = '<div role="tab" aria-selected="true">为你推荐</div>';
+        }, 50);
+      </script>
+    """)
+
+    result = await XActions().timeline.open(
+        page,
+        {"feed": "for-you"},
+        {"timeoutMs": 1000},
+    )
+
+    assert result.status == "skipped"
+    assert result.data["timeline"] == "for-you"
+
+
+@pytest.mark.asyncio
 async def test_account_session_distinguishes_signed_in_and_out(page):
     await page.set_content('<div data-testid="SideNav_AccountSwitcher_Button">Alice\n@alice</div>')
     signed_in = await XActions().account.getSession(page)
