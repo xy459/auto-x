@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Any, Protocol
 
 from ..cloak import region_label_for_timezone, resolve_launch_identity
-from ..config import Account, AccountsConfig
+from ..config import Account, AccountsConfig, _atomic_write
 from .launch_args import build_cloak_args, resolve_cloak_exe
 from .procutil import kill_for_data_dir, wait_for_exit
 
@@ -44,6 +45,49 @@ def _resolve_extension_paths(config: AccountsConfig) -> list[str]:
             raise RuntimeError(f"插件目录缺少 manifest.json: {path}")
         result.append(str(path))
     return result
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"无法读取 Chromium Profile 配置: {path}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Chromium Profile 配置不是 JSON 对象: {path}")
+    return value
+
+
+def _sync_chromium_profile_name(account: Account) -> None:
+    """Keep Chromium's visible profile label aligned with the account name."""
+    profile_name = account.display_name
+    preferences_path = account.data_dir / "Default" / "Preferences"
+    preferences = _read_json_object(preferences_path)
+    profile_preferences = preferences.setdefault("profile", {})
+    if not isinstance(profile_preferences, dict):
+        profile_preferences = {}
+        preferences["profile"] = profile_preferences
+    profile_preferences["name"] = profile_name
+    _atomic_write(preferences_path, preferences)
+
+    local_state_path = account.data_dir / "Local State"
+    local_state = _read_json_object(local_state_path)
+    local_profiles = local_state.setdefault("profile", {})
+    if not isinstance(local_profiles, dict):
+        local_profiles = {}
+        local_state["profile"] = local_profiles
+    info_cache = local_profiles.setdefault("info_cache", {})
+    if not isinstance(info_cache, dict):
+        info_cache = {}
+        local_profiles["info_cache"] = info_cache
+    default_profile = info_cache.setdefault("Default", {})
+    if not isinstance(default_profile, dict):
+        default_profile = {}
+        info_cache["Default"] = default_profile
+    default_profile["name"] = profile_name
+    default_profile["is_using_default_name"] = False
+    _atomic_write(local_state_path, local_state)
 
 
 class AccountSession:
@@ -103,6 +147,7 @@ class AccountSession:
         stale = await loop.run_in_executor(None, kill_for_data_dir, self.account.data_dir)
         if stale:
             logger.info("%s removed stale browser processes: %s", self.acc, stale)
+        await asyncio.to_thread(_sync_chromium_profile_name, self.account)
 
         executable = resolve_cloak_exe(self.account, self.config)
         if executable and not await asyncio.to_thread(Path(executable).exists):

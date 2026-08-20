@@ -349,6 +349,40 @@ class SQLiteStore:
             )
             return cursor.rowcount == 1
 
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task while retaining its completed run history."""
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    self._connection.execute("ROLLBACK")
+                    return False
+                active = self._connection.execute(
+                    """
+                    SELECT 1 FROM task_runs
+                    WHERE task_id = ? AND status IN ('queued', 'running')
+                    LIMIT 1
+                    """,
+                    (task_id,),
+                ).fetchone()
+                if active is not None:
+                    raise ValueError("任务仍有排队中或运行中的记录，请先取消并等待结束")
+                self._connection.execute(
+                    "UPDATE task_runs SET task_id = NULL WHERE task_id = ?", (task_id,)
+                )
+                self._connection.execute(
+                    "DELETE FROM scheduled_fires WHERE task_id = ?", (task_id,)
+                )
+                self._connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+                self._connection.execute("COMMIT")
+                return True
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
     async def trigger_task(
         self,
         task_id: str,
@@ -502,6 +536,32 @@ class SQLiteStore:
         with self._lock:
             row = self._connection.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
         return self._run_from_row(row) if row else None
+
+    async def delete_run(self, run_id: str) -> bool:
+        """Delete a completed run, its logs, and dangling rerun references."""
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT status FROM task_runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                if row is None:
+                    self._connection.execute("ROLLBACK")
+                    return False
+                if not RunStatus(row["status"]).terminal:
+                    raise ValueError("排队中或运行中的记录不能删除，请先取消并等待结束")
+                self._connection.execute(
+                    "UPDATE task_runs SET rerun_of = NULL WHERE rerun_of = ?", (run_id,)
+                )
+                self._connection.execute(
+                    "DELETE FROM task_logs WHERE task_run_id = ?", (run_id,)
+                )
+                self._connection.execute("DELETE FROM task_runs WHERE id = ?", (run_id,))
+                self._connection.execute("COMMIT")
+                return True
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
 
     def _run_from_row(self, row: sqlite3.Row) -> TaskRunSnapshot:
         return TaskRunSnapshot(

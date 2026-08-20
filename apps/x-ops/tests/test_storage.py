@@ -229,6 +229,119 @@ async def test_rerun_is_new_queued_snapshot(store):
     assert rerun.status is RunStatus.QUEUED
 
 
+async def test_delete_task_preserves_completed_runs_and_rejects_active_runs(store):
+    completed_task = Task(
+        id="completed-task",
+        name="completed",
+        program_name="browse_only",
+        account_ids=("a",),
+        params={},
+    )
+    await store.create_task(completed_task)
+    await store.create_run(
+        TaskRunSnapshot(
+            id="completed-run",
+            task_id=completed_task.id,
+            program_name="browse_only",
+            account_id="a",
+            params={},
+            status=RunStatus.QUEUED,
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert await store.claim("completed-run", "runner")
+    assert await store.mark_running("completed-run", "runner", "1.0.0")
+    assert await store.finish(
+        "completed-run", "runner", RunOutcome.succeeded({"ok": True})
+    )
+
+    assert await store.delete_task(completed_task.id) is True
+    assert await store.get_task(completed_task.id) is None
+    assert (await store.get_run("completed-run")).task_id is None
+    assert await store.delete_task("missing-task") is False
+
+    active_task = Task(
+        id="active-task",
+        name="active",
+        program_name="browse_only",
+        account_ids=("a",),
+        params={},
+    )
+    await store.create_task(active_task)
+    await store.create_run(
+        TaskRunSnapshot(
+            id="active-run",
+            task_id=active_task.id,
+            program_name="browse_only",
+            account_id="a",
+            params={},
+            status=RunStatus.QUEUED,
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert await store.claim("active-run", "runner")
+    assert await store.mark_running("active-run", "runner", "1.0.0")
+
+    with pytest.raises(ValueError, match="排队中或运行中"):
+        await store.delete_task(active_task.id)
+    assert await store.get_task(active_task.id) is not None
+
+
+async def test_delete_completed_run_removes_logs_and_clears_rerun_reference(store):
+    await store.create_run(
+        TaskRunSnapshot(
+            id="old-run",
+            program_name="browse_only",
+            account_id="a",
+            params={},
+            status=RunStatus.QUEUED,
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert await store.claim("old-run", "runner")
+    assert await store.mark_running("old-run", "runner", "1.0.0")
+    assert await store.finish("old-run", "runner", RunOutcome.succeeded({}))
+    await store.create_run(
+        TaskRunSnapshot(
+            id="child-run",
+            rerun_of="old-run",
+            program_name="browse_only",
+            account_id="a",
+            params={},
+            status=RunStatus.QUEUED,
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert await store.request_cancel("child-run")
+    store.append_log_now(
+        task_run_id="old-run",
+        account_id="a",
+        level="INFO",
+        message="to be deleted",
+        fields={},
+    )
+
+    assert await store.delete_run("old-run") is True
+    assert await store.get_run("old-run") is None
+    assert await store.list_logs("old-run") == []
+    assert (await store.get_run("child-run")).rerun_of is None
+    assert await store.delete_run("missing-run") is False
+
+    await store.create_run(
+        TaskRunSnapshot(
+            id="queued-run",
+            program_name="browse_only",
+            account_id="a",
+            params={},
+            status=RunStatus.QUEUED,
+            created_at=datetime.now(UTC),
+        )
+    )
+    with pytest.raises(ValueError, match="不能删除"):
+        await store.delete_run("queued-run")
+    assert await store.get_run("queued-run") is not None
+
+
 async def test_in_memory_accounts_are_mutable_business_metadata():
     accounts = InMemoryAccountStore()
     created = await accounts.create_account(

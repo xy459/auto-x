@@ -70,3 +70,12 @@ async def rerun(
     if result is None:
         raise HTTPException(404, "运行记录不存在")
     return result
+
+
+@router.delete("/task-runs/{run_id}")
+async def delete_run(
+    run_id: str, services: AdminServices = Depends(get_services)
+) -> JsonObject:
+    if not await services.backend.delete_run(run_id):
+        raise HTTPException(404, "运行记录不存在")
+    return {"deleted": True}

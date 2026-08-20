@@ -86,6 +86,56 @@ def test_account_crud_and_browser_actions(tmp_path: Path, monkeypatch):
         assert client.get("/api/accounts").json()["accounts"] == []
 
 
+def test_running_account_can_save_network_check_only(tmp_path: Path, monkeypatch):
+    config_store = ConfigStore(tmp_path / "config")
+    registry = FakeRegistry()
+    monkeypatch.setattr(api, "store", config_store)
+    monkeypatch.setattr(api, "session_registry", registry)
+
+    with TestClient(app) as client:
+        created = client.post("/api/accounts", json={
+            "name": "A", "userDataDir": str(tmp_path / "profiles" / "a"),
+        }).json()["account"]
+        acc = created["acc"]
+        assert client.post(f"/api/browser/{acc}/open").status_code == 200
+
+        payload = {
+            key: created[key]
+            for key in (
+                "name", "userDataDir", "browserPath", "geolocation", "fpPlatform",
+                "platformVersion", "brandVersion", "releaseChannel", "browserVersion",
+                "cloakArgs", "humanPreset", "humanize", "headless",
+            )
+        }
+        payload["network"] = {
+            **created["network"],
+            "lastCheck": {
+                "exitIp": "203.0.113.8",
+                "detectedTimezone": "Asia/Tokyo",
+                "detectedLocale": "ja-JP",
+                "appliedTimezone": "Asia/Tokyo",
+                "appliedLocale": "ja-JP",
+                "timezoneSource": "auto",
+                "localeSource": "auto",
+                "webrtcIp": "203.0.113.8",
+                "checkedAt": "2026-08-20T15:00:00Z",
+                "proxySignature": api.cloak.proxy_signature(None),
+                "latencyMs": 42,
+                "stale": False,
+            },
+        }
+
+        saved = client.put(f"/api/accounts/{acc}", json=payload)
+        assert saved.status_code == 200
+        assert registry.is_running(acc)
+        assert saved.json()["account"]["network"]["lastCheck"]["exitIp"] == "203.0.113.8"
+
+        payload["name"] = "B"
+        blocked = client.put(f"/api/accounts/{acc}", json=payload)
+        assert blocked.status_code == 409
+        assert "修改其他配置前请先关闭浏览器" in blocked.json()["detail"]
+
+
 def test_health_and_static_console(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(api, "store", ConfigStore(tmp_path / "config"))
     monkeypatch.setattr(api, "session_registry", FakeRegistry())

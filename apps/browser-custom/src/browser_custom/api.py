@@ -153,6 +153,18 @@ def _mark_stale_network_check(account: Account) -> None:
         check.stale = True
 
 
+def _launch_configuration(account: Account) -> JsonObject:
+    """Return account settings that affect the running browser session."""
+    payload = account.model_dump(mode="json")
+    network = payload.get("network")
+    if isinstance(network, dict):
+        network.pop("lastCheck", None)
+        proxy = network.get("proxy")
+        if isinstance(proxy, dict) and account.network.proxy:
+            proxy["password"] = account.network.proxy.password
+    return payload
+
+
 def _save_accounts(accounts: list[Account], *, browser_path: str | None = None,
                    user_base: str | None = None,
                    extension_paths: list[str] | None = None) -> AccountsConfig:
@@ -235,13 +247,16 @@ def update_account(acc: str, body: JsonObject) -> JsonObject:
     index = next((i for i, account in enumerate(store.accounts.accounts) if account.acc == acc), None)
     if index is None:
         raise HTTPException(404, f"未知账户: {acc}")
-    if session_registry.is_running(acc):
-        raise HTTPException(409, "浏览器正在运行，请先关闭后再修改配置")
     existing = store.accounts.accounts[index]
     try:
         account = Account.model_validate(_prepare_account_payload(body, acc, existing))
     except ValidationError as exc:
         raise HTTPException(400, _validation_errors(exc)) from exc
+    if (
+        session_registry.is_running(acc)
+        and _launch_configuration(account) != _launch_configuration(existing)
+    ):
+        raise HTTPException(409, "浏览器正在运行；仅可保存网络检测记录，修改其他配置前请先关闭浏览器")
     _mark_stale_network_check(account)
     accounts = list(store.accounts.accounts)
     accounts[index] = account

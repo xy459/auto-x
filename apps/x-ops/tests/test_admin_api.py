@@ -125,6 +125,16 @@ class FakeBackend:
         self.tasks.append(source)
         return deepcopy(source)
 
+    async def delete_task(self, task_id):
+        task = next((x for x in self.tasks if x["id"] == task_id), None)
+        if task is None:
+            return False
+        self.tasks.remove(task)
+        for run in self.runs:
+            if run.get("task_id") == task_id:
+                run["task_id"] = None
+        return True
+
     async def set_task_enabled(self, task_id, enabled):
         return await self.update_task(task_id, {"enabled": enabled})
 
@@ -172,6 +182,16 @@ class FakeBackend:
         new = {**old, "id": "rerun-1", "status": "queued", "rerun_of": run_id}
         self.runs.append(new)
         return {"run": deepcopy(new)}
+
+    async def delete_run(self, run_id):
+        run = next((x for x in self.runs if x["id"] == run_id), None)
+        if run is None:
+            return False
+        if run["status"] in {"queued", "running"}:
+            raise AdminAPIError(409, "运行记录尚未结束")
+        self.runs.remove(run)
+        self.logs.pop(run_id, None)
+        return True
 
     async def runtime_status(self):
         return {"browser-custom": True, "Task Runner": True}
@@ -243,6 +263,16 @@ def test_task_multi_account_run_cancel_and_rerun(tmp_path):
         rerun = client.post("/api/task-runs/run-1/rerun")
         assert rerun.status_code == 201
         assert rerun.json()["run"]["rerun_of"] == "run-1"
+
+        deleted_run = client.delete("/api/task-runs/run-1")
+        assert deleted_run.status_code == 200
+        assert deleted_run.json()["deleted"] is True
+        assert client.delete("/api/task-runs/run-1").status_code == 404
+
+        deleted_task = client.delete(f"/api/tasks/{task_id}")
+        assert deleted_task.status_code == 200
+        assert deleted_task.json()["deleted"] is True
+        assert client.delete(f"/api/tasks/{task_id}").status_code == 404
 
 
 def test_browser_batch_and_runtime_settings(tmp_path):
@@ -316,6 +346,14 @@ class FakeBrowserClient:
         return {"ok": True, "account_ids": list(account_ids), "action": action}
 
 
+class MutableBrowserClient(FakeBrowserClient):
+    def __init__(self, accounts):
+        self.accounts = accounts
+
+    async def list_accounts(self):
+        return list(self.accounts)
+
+
 class NoopRunner:
     def __init__(self):
         self.executed = []
@@ -364,6 +402,37 @@ async def test_core_backend_rejects_close_while_profile_is_busy(tmp_path):
     with pytest.raises(AdminAPIError) as active:
         await backend.browser_action("account-1", "restart")
     assert active.value.status_code == 409
+    await store.close()
+
+
+async def test_account_list_follows_browser_creation_order_and_hides_deleted_accounts(tmp_path):
+    store = SQLiteStore(tmp_path / "runs.sqlite3")
+    await store.initialize()
+    account_store = JsonAccountStore(tmp_path / "accounts.json")
+    browser_client = MutableBrowserClient([
+        {"acc": "browser-z", "name": "最先创建"},
+        {"acc": "browser-a", "name": "后来创建"},
+    ])
+    backend = CoreAdminBackend(
+        store=store,
+        account_store=account_store,
+        registry=TaskProgramRegistry.default(),
+        runner=NoopRunner(),
+        browser_client=browser_client,
+        task_metadata=JsonSettingsStore(tmp_path / "task-meta.json", {"tasks": {}}),
+        execution_slots=ExecutionSlotManager(2),
+    )
+
+    first = await backend.list_accounts()
+    assert [account["id"] for account in first] == ["browser-z", "browser-a"]
+
+    browser_client.accounts = [{"acc": "browser-a", "name": "后来创建"}]
+    second = await backend.list_accounts()
+    assert [account["id"] for account in second] == ["browser-a"]
+    deleted = await account_store.get_account("browser-z")
+    assert deleted is not None
+    assert deleted.archived is True
+
     await store.close()
 
 

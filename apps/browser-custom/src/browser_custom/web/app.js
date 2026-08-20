@@ -25,7 +25,8 @@ async function api(path, init = {}) {
         return field ? `${field}：${message}` : message;
       }).join("；");
     } else if (typeof detail !== "string") {
-      detail = JSON.stringify(detail);
+      const serialized = JSON.stringify(detail);
+      detail = serialized && serialized !== "{}" ? serialized : `请求失败（HTTP ${response.status}）`;
     }
     throw new Error(detail);
   }

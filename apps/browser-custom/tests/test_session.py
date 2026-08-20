@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -7,7 +8,11 @@ import pytest
 from cloakbrowser.browser import build_args
 
 from browser_custom.browser import session as session_module
-from browser_custom.browser.session import AccountSession, _resolve_extension_paths
+from browser_custom.browser.session import (
+    AccountSession,
+    _resolve_extension_paths,
+    _sync_chromium_profile_name,
+)
 from browser_custom.cloak import resolve_launch_identity
 from browser_custom.config import Account, AccountsConfig
 
@@ -37,6 +42,54 @@ def test_cloakbrowser_builds_official_extension_flags(tmp_path: Path):
     args = build_args(False, [], extension_paths=[str(extension)])
     assert f"--load-extension={extension}" in args
     assert f"--disable-extensions-except={extension}" in args
+
+
+def test_sync_chromium_profile_name_preserves_existing_preferences(tmp_path: Path):
+    profile_dir = tmp_path / "profile"
+    preferences_path = profile_dir / "Default" / "Preferences"
+    local_state_path = profile_dir / "Local State"
+    preferences_path.parent.mkdir(parents=True)
+    preferences_path.write_text(
+        '{"profile":{"name":"Person 1","avatar_index":26},"intl":{"selected_languages":"zh-CN"}}',
+        encoding="utf-8",
+    )
+    local_state_path.write_text(
+        '{"profile":{"info_cache":{"Default":{"name":"Person 1","is_using_default_name":true,"avatar_icon":"avatar"}}},"browser":{"enabled_labs_experiments":["example"]}}',
+        encoding="utf-8",
+    )
+    account = Account(acc="account-1", name="X主账号", userDataDir=str(profile_dir))
+
+    _sync_chromium_profile_name(account)
+
+    preferences = json.loads(preferences_path.read_text(encoding="utf-8"))
+    local_state = json.loads(local_state_path.read_text(encoding="utf-8"))
+    assert preferences["profile"]["name"] == "X主账号"
+    assert preferences["profile"]["avatar_index"] == 26
+    assert preferences["intl"]["selected_languages"] == "zh-CN"
+    cached = local_state["profile"]["info_cache"]["Default"]
+    assert cached["name"] == "X主账号"
+    assert cached["is_using_default_name"] is False
+    assert cached["avatar_icon"] == "avatar"
+    assert local_state["browser"]["enabled_labs_experiments"] == ["example"]
+
+
+def test_sync_chromium_profile_name_initializes_new_profile(tmp_path: Path):
+    profile_dir = tmp_path / "profile"
+    account = Account(acc="account-1", name="", userDataDir=str(profile_dir))
+
+    _sync_chromium_profile_name(account)
+
+    preferences = json.loads(
+        (profile_dir / "Default" / "Preferences").read_text(encoding="utf-8")
+    )
+    local_state = json.loads(
+        (profile_dir / "Local State").read_text(encoding="utf-8")
+    )
+    assert preferences["profile"]["name"] == "account-1"
+    assert local_state["profile"]["info_cache"]["Default"] == {
+        "name": "account-1",
+        "is_using_default_name": False,
+    }
 
 
 @pytest.mark.asyncio

@@ -223,17 +223,22 @@ class CoreAdminBackend:
         except AdminAPIError:
             if not tolerate_unavailable:
                 raise
-            browser_accounts = []
-        known = {account.id: account for account in await self.account_store.list_accounts()}
-        known_browser_ids = {
-            account.browser_account_id for account in known.values() if account.browser_account_id
+            return []
+        known_accounts = await self.account_store.list_accounts()
+        known = {account.id: account for account in known_accounts}
+        known_by_browser_id = {
+            account.browser_account_id: account
+            for account in known_accounts
+            if account.browser_account_id
         }
+        live_browser_ids: set[str] = set()
         for browser in browser_accounts:
             browser_id = str(browser.get("acc") or browser.get("id") or "")
             if not browser_id:
                 continue
-            existing = known.get(browser_id)
-            if existing is None and browser_id not in known_browser_ids:
+            live_browser_ids.add(browser_id)
+            existing = known_by_browser_id.get(browser_id) or known.get(browser_id)
+            if existing is None:
                 await self.account_store.create_account(
                     AccountRecord(
                         id=browser_id,
@@ -241,6 +246,15 @@ class CoreAdminBackend:
                         browser_account_id=browser_id,
                     )
                 )
+            elif existing.archived:
+                await self.account_store.update_account(existing.id, archived=False)
+        for account in known_accounts:
+            if (
+                account.browser_account_id
+                and account.browser_account_id not in live_browser_ids
+                and not account.archived
+            ):
+                await self.account_store.update_account(account.id, archived=True)
         return browser_accounts
 
     async def dashboard(self) -> JsonObject:
@@ -283,9 +297,27 @@ class CoreAdminBackend:
         browser_by_id = {
             str(item.get("acc") or item.get("id")): item for item in browser_accounts
         }
+        browser_order = {
+            str(item.get("acc") or item.get("id")): index
+            for index, item in enumerate(browser_accounts)
+            if item.get("acc") or item.get("id")
+        }
         runs = await self.store.list_runs()
         result = []
-        for account in await self.account_store.list_accounts():
+        accounts = [
+            account
+            for account in await self.account_store.list_accounts()
+            if not account.archived
+        ]
+        accounts.sort(
+            key=lambda account: (
+                0,
+                browser_order[account.browser_account_id or account.id],
+            )
+            if (account.browser_account_id or account.id) in browser_order
+            else (1, account.id)
+        )
+        for account in accounts:
             browser = browser_by_id.get(account.browser_account_id or account.id, {})
             account_runs = [run for run in runs if run.account_id == account.id]
             task_status = (
@@ -503,6 +535,18 @@ class CoreAdminBackend:
         self._save_task_meta(clone.id, self._task_meta(task.id))
         return self._task_public(clone)
 
+    async def delete_task(self, task_id: str) -> bool:
+        try:
+            deleted = await self.store.delete_task(task_id)
+        except ValueError as exc:
+            raise AdminAPIError(409, str(exc)) from exc
+        if deleted:
+            settings = self.task_metadata.get()
+            tasks = dict(settings.get("tasks", {}))
+            tasks.pop(task_id, None)
+            self.task_metadata.update({"tasks": tasks})
+        return deleted
+
     async def set_task_enabled(self, task_id: str, enabled: bool) -> JsonObject | None:
         return await self.update_task(task_id, {"enabled": enabled})
 
@@ -582,6 +626,12 @@ class CoreAdminBackend:
         run = await self.store.create_rerun(run_id)
         self._submit_runs([run])
         return {"run": serialize_run(run)}
+
+    async def delete_run(self, run_id: str) -> bool:
+        try:
+            return await self.store.delete_run(run_id)
+        except ValueError as exc:
+            raise AdminAPIError(409, str(exc)) from exc
 
     async def runtime_status(self) -> JsonObject:
         runs = await self.store.list_runs()

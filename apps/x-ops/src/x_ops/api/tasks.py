@@ -80,6 +80,15 @@ async def clone_task(
     return {"task": task}
 
 
+@router.delete("/tasks/{task_id}")
+async def delete_task(
+    task_id: str, services: AdminServices = Depends(get_services)
+) -> JsonObject:
+    if not await services.backend.delete_task(task_id):
+        raise HTTPException(404, "任务不存在")
+    return {"deleted": True}
+
+
 async def _set_enabled(
     task_id: str, enabled: bool, services: AdminServices
 ) -> JsonObject:
