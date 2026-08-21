@@ -59,7 +59,7 @@
               <label>任务说明<textarea id="taskDescription" rows="2"></textarea></label>
               <label>任务程序<select id="taskProgram" required></select></label>
               <div id="programHelp" class="help"></div>
-              <fieldset><legend>账户</legend><div id="taskAccounts" class="check-list"></div></fieldset>
+              <fieldset><legend>账户</legend><label class="check-list-select-all"><input type="checkbox" id="taskSelectAll"> 全选</label><div id="taskAccounts" class="check-list"></div></fieldset>
               <label>业务参数（JSON）<textarea id="taskParams" class="code" rows="10">{}</textarea></label>
               <div id="schemaHelp" class="schema-help"></div>
               <div class="grid two compact"><label>浏览器结束策略<select id="taskBrowserPolicy"><option value="keep_open">保持打开</option><option value="close">任务后关闭</option></select></label><label>Task 状态<select id="taskEnabled"><option value="true">启用</option><option value="false">停用</option></select></label></div>
@@ -96,6 +96,6 @@
       </section>
     </main>
   </div>
-  <script src="/assets/app.js?v=20260821-1"></script>
+  <script src="/assets/app.js?v=20260821-2"></script>
 </body>
 </html>
