@@ -446,6 +446,10 @@ class FakeInProcessRegistry:
     async def ensure_started(self, account, config):
         self.calls.append(("open", account.acc, config))
 
+    async def open(self, account, config):
+        self.calls.append(("open", account.acc, config))
+        return {"running": True, "activated": False, "windowActivated": True}
+
     async def close(self, account):
         self.calls.append(("close", account.acc, None))
         return {"closed": True}

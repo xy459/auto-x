@@ -61,6 +61,19 @@ class SessionRegistry:
         async with self._lock(account.acc):
             return await self._ensure_started_locked(account, config)
 
+    async def open(self, account: Account, config: AccountsConfig) -> dict[str, bool]:
+        """Start an account browser or raise its existing window."""
+        async with self._lock(account.acc):
+            existing = self._sessions.get(account.acc)
+            already_running = bool(existing and existing.is_alive())
+            session = await self._ensure_started_locked(account, config)
+            window_activated = await session.bring_to_front()
+            return {
+                "running": True,
+                "activated": already_running,
+                "windowActivated": window_activated,
+            }
+
     async def acquire_page(self, account: Account, config: AccountsConfig) -> BrowserPageLease:
         """Return an isolated task page inside the account persistent context."""
         async with self._lock(account.acc):

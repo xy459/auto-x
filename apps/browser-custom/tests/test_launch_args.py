@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from browser_custom.browser import procutil
 from browser_custom.browser.launch_args import build_cloak_args, resolve_cloak_exe
@@ -62,6 +63,19 @@ def test_process_stats_many_scans_once_and_groups_process_trees(tmp_path: Path, 
         {"mainPids": [100], "processCount": 3},
         {"mainPids": [200], "processCount": 2},
     ]
+
+
+def test_macos_activation_targets_profile_main_pid(tmp_path: Path, monkeypatch):
+    completed = SimpleNamespace(returncode=0, stdout="true\n")
+    run = Mock(return_value=completed)
+    monkeypatch.setattr(procutil, "IS_MACOS", True)
+    monkeypatch.setattr(procutil, "find_main_pids_for", lambda _path: [4317])
+    monkeypatch.setattr(procutil.subprocess, "run", run)
+
+    assert procutil.activate_for_data_dir(tmp_path) is True
+    command = run.call_args.args[0]
+    assert command[:4] == ["/usr/bin/osascript", "-l", "JavaScript", "-e"]
+    assert command[-1] == "4317"
 
 
 def test_build_cloak_args_contains_fingerprint_fields(tmp_path: Path):

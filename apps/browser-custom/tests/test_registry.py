@@ -11,6 +11,7 @@ from browser_custom.config import Account, AccountsConfig
 class FakeSession:
     starts = 0
     closes = 0
+    activations = 0
 
     def __init__(self, account, config):
         self.account = account
@@ -41,6 +42,10 @@ class FakeSession:
         self.pages.append(page)
         return page
 
+    async def bring_to_front(self):
+        type(self).activations += 1
+        return True
+
 
 class FakePage:
     def __init__(self):
@@ -56,6 +61,9 @@ class FakePage:
     async def close(self):
         self.closed = True
 
+    async def bring_to_front(self):
+        pass
+
     def emit_popup(self, page):
         self.handlers["popup"](page)
 
@@ -64,6 +72,7 @@ class FakePage:
 def reset_fake():
     FakeSession.starts = 0
     FakeSession.closes = 0
+    FakeSession.activations = 0
 
 
 @pytest.mark.asyncio
@@ -75,6 +84,21 @@ async def test_ensure_started_is_idempotent(tmp_path: Path):
     second = await registry.ensure_started(account, config)
     assert first is second
     assert FakeSession.starts == 1
+
+
+@pytest.mark.asyncio
+async def test_open_starts_then_raises_existing_account_browser(tmp_path: Path):
+    account = Account(acc="a", userDataDir=str(tmp_path / "a"))
+    config = AccountsConfig(accounts=[account])
+    registry = SessionRegistry(FakeSession)
+
+    first = await registry.open(account, config)
+    second = await registry.open(account, config)
+
+    assert first == {"running": True, "activated": False, "windowActivated": True}
+    assert second == {"running": True, "activated": True, "windowActivated": True}
+    assert FakeSession.starts == 1
+    assert FakeSession.activations == 2
 
 
 @pytest.mark.asyncio

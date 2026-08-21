@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from ..cloak import region_label_for_timezone, resolve_launch_identity
 from ..config import Account, AccountsConfig, _atomic_write
 from .launch_args import build_cloak_args, resolve_cloak_exe
-from .procutil import kill_for_data_dir, wait_for_exit
+from .procutil import activate_for_data_dir, kill_for_data_dir, wait_for_exit
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,17 @@ class AccountSession:
     async def new_page(self) -> Any:
         """Create a caller-owned page while keeping profile state in this context."""
         return await self.context.new_page()
+
+    async def bring_to_front(self) -> bool:
+        """Raise this account's existing browser window for a manual open action."""
+        context = self.context
+        pages = [page for page in list(getattr(context, "pages", [])) if not page.is_closed()]
+        page = pages[-1] if pages else await context.new_page()
+        await page.bring_to_front()
+        activated = await asyncio.to_thread(activate_for_data_dir, self.account.data_dir)
+        if not activated:
+            logger.debug("%s browser page selected but native window activation was unavailable", self.acc)
+        return activated
 
     def _on_close(self, *_args: object) -> None:
         self._alive = False

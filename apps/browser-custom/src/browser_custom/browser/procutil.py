@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,18 @@ from typing import TypedDict, cast
 import psutil  # type: ignore[import-untyped]
 
 IS_WINDOWS = sys.platform.startswith("win")
+IS_MACOS = sys.platform == "darwin"
+
+_MACOS_ACTIVATE_SCRIPT = """
+ObjC.import("AppKit");
+function run(argv) {
+  const pid = Number(argv[0]);
+  const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
+  if (!app) return "false";
+  const options = $.NSApplicationActivateAllWindows | $.NSApplicationActivateIgnoringOtherApps;
+  return app.activateWithOptions(options) ? "true" : "false";
+}
+"""
 
 
 class ProcessStats(TypedDict):
@@ -83,6 +96,29 @@ def process_stats_many(data_dirs: list[Path]) -> list[ProcessStats]:
 
 def find_main_pids_for(data_dir: Path) -> list[int]:
     return process_stats_many([data_dir])[0]["mainPids"]
+
+
+def activate_for_data_dir(data_dir: Path) -> bool:
+    """Activate the exact macOS app process that owns this browser profile."""
+    if not IS_MACOS:
+        return False
+    for pid in reversed(find_main_pids_for(data_dir)):
+        try:
+            result = subprocess.run(
+                [
+                    "/usr/bin/osascript", "-l", "JavaScript",
+                    "-e", _MACOS_ACTIVATE_SCRIPT, str(pid),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and result.stdout.strip() == "true":
+            return True
+    return False
 
 
 def tree_kill(pid: int, timeout: float = 5.0) -> None:

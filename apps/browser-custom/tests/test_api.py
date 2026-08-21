@@ -40,6 +40,11 @@ class FakeRegistry:
     async def ensure_started(self, account, _config):
         self.running.add(account.acc)
 
+    async def open(self, account, _config):
+        activated = account.acc in self.running
+        self.running.add(account.acc)
+        return {"running": True, "activated": activated, "windowActivated": True}
+
     async def close(self, account):
         was_running = account.acc in self.running
         self.running.discard(account.acc)
@@ -68,6 +73,12 @@ def test_account_crud_and_browser_actions(tmp_path: Path, monkeypatch):
 
         opened = client.post(f"/api/browser/{acc}/open")
         assert opened.status_code == 200
+        assert opened.json()["activated"] is False
+        assert opened.json()["windowActivated"] is True
+        reopened = client.post(f"/api/browser/{acc}/open")
+        assert reopened.status_code == 200
+        assert reopened.json()["activated"] is True
+        assert reopened.json()["windowActivated"] is True
         assert client.get("/api/accounts").json()["accounts"][0]["runtime"]["status"] == "running"
 
         blocked = client.put(f"/api/accounts/{acc}", json={

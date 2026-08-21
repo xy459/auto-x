@@ -113,8 +113,10 @@ class InProcessBrowserCustomClient:
             raise AdminAPIError(404, f"未知 browser-custom 账户：{account_id}")
         try:
             if action == "open":
-                await self._registry.ensure_started(account, self._config_store.accounts)
-                return {"ok": True, "running": True}
+                return {
+                    "ok": True,
+                    **await self._registry.open(account, self._config_store.accounts),
+                }
             if action == "close":
                 return {"ok": True, **await self._registry.close(account)}
             if action == "restart":

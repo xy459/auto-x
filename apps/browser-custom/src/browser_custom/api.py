@@ -281,8 +281,7 @@ def browser_status() -> JsonObject:
 
 async def _run_browser_action(account: Account, action: str) -> JsonObject:
     if action == "open":
-        await session_registry.ensure_started(account, store.accounts)
-        return {"running": True}
+        return await session_registry.open(account, store.accounts)
     if action == "close":
         return await session_registry.close(account)
     if action == "restart":
