@@ -170,6 +170,7 @@ class GeolocationConfig(BaseModel):
 class Account(BaseModel):
     acc: str
     name: str = ""
+    xUsername: str | None = None
     userDataDir: str
     browserPath: str | None = None
 
@@ -231,13 +232,23 @@ class Account(BaseModel):
         return payload
 
     @field_validator(
-        "browserPath", "platformVersion", "brandVersion", "browserVersion", mode="before"
+        "browserPath", "platformVersion", "brandVersion", "browserVersion", "xUsername",
+        mode="before",
     )
     @classmethod
     def _empty_to_none(cls, value: Any) -> Any:
         if isinstance(value, str):
             value = value.strip()
             return value or None
+        return value
+
+    @field_validator("xUsername")
+    @classmethod
+    def _valid_x_username(cls, value: str | None) -> str | None:
+        if value:
+            value = value.lstrip("@")
+            if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", value):
+                raise ValueError("X 用户名格式无效")
         return value
 
     @field_validator("fpPlatform", mode="before")
@@ -484,6 +495,20 @@ class ConfigStore:
             self.accounts = config
             for reference in old_refs - self._secret_refs(config):
                 self.secret_store.delete(reference)
+
+    def update_x_username(self, acc: str, username: str) -> bool:
+        """Persist a username detected from an authenticated X profile link."""
+        with self._lock:
+            account = self.accounts.get(acc)
+            if account is None:
+                return False
+            normalized = username.strip().lstrip("@")
+            if account.xUsername == normalized:
+                return False
+            updated = account.model_copy(update={"xUsername": normalized})
+            accounts = [updated if item.acc == acc else item for item in self.accounts.accounts]
+            self.save(self.accounts.model_copy(update={"accounts": accounts}))
+            return True
 
     def _hydrate_secrets(self, config: AccountsConfig) -> None:
         for account in config.accounts:

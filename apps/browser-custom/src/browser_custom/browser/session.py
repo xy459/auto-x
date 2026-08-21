@@ -5,8 +5,11 @@ import asyncio
 import json
 import logging
 import os
+import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from ..cloak import region_label_for_timezone, resolve_launch_identity
 from ..config import Account, AccountsConfig, _atomic_write
@@ -19,6 +22,33 @@ logger = logging.getLogger(__name__)
 # Serialize env mutation + launch so concurrent accounts cannot inherit each other's path.
 _LAUNCH_LOCK = asyncio.Lock()
 _PLAYWRIGHT_DISABLE_EXTENSIONS_ARG = "--disable-extensions"
+_X_PROFILE_SELECTOR = 'a[data-testid="AppTabBar_Profile_Link"]'
+_X_RESERVED_PATHS = {
+    "account", "compose", "explore", "home", "i", "jobs", "login", "logout",
+    "messages", "notifications", "search", "settings", "signup",
+}
+
+
+def _x_username_from_href(href: str | None) -> str | None:
+    if not href:
+        return None
+    path = urlparse(href).path.strip("/")
+    if "/" in path or path.casefold() in _X_RESERVED_PATHS:
+        return None
+    return path if re.fullmatch(r"[A-Za-z0-9_]{1,15}", path) else None
+
+
+async def detect_x_username(page: Any) -> str | None:
+    """Read the authenticated account name from X's profile navigation link."""
+    try:
+        host = (urlparse(str(page.url)).hostname or "").casefold()
+        if host not in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+            return None
+        profile_link = page.locator(_X_PROFILE_SELECTOR).first
+        href = await profile_link.get_attribute("href", timeout=1500)
+        return _x_username_from_href(href)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 class _CloakBrowserModule(Protocol):
@@ -91,13 +121,20 @@ def _sync_chromium_profile_name(account: Account) -> None:
 
 
 class AccountSession:
-    def __init__(self, account: Account, config: AccountsConfig) -> None:
+    def __init__(
+        self,
+        account: Account,
+        config: AccountsConfig,
+        on_x_username: Callable[[str, str], bool] | None = None,
+    ) -> None:
         self.account = account
         self.config = config
         self.acc = account.acc
         self._context: Any | None = None
         self._alive = False
         self._fingerprint: dict[str, Any] | None = None
+        self._on_x_username = on_x_username
+        self._x_identity_task: asyncio.Task[None] | None = None
 
     def is_alive(self) -> bool:
         return self._context is not None and self._alive
@@ -126,7 +163,29 @@ class AccountSession:
 
     def _on_close(self, *_args: object) -> None:
         self._alive = False
+        if self._x_identity_task:
+            self._x_identity_task.cancel()
         logger.info("%s browser context closed", self.acc)
+
+    async def _scan_x_username(self) -> None:
+        if self._context is None or self._on_x_username is None:
+            return
+        for page in list(getattr(self._context, "pages", [])):
+            username = await detect_x_username(page)
+            if not username or username == self.account.xUsername:
+                continue
+            await asyncio.to_thread(self._on_x_username, self.acc, username)
+            self.account.xUsername = username
+            logger.info("%s detected authenticated X username @%s", self.acc, username)
+            return
+
+    async def _monitor_x_identity(self) -> None:
+        while self._alive:
+            try:
+                await self._scan_x_username()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("%s X username detection failed: %s", self.acc, exc)
+            await asyncio.sleep(3)
 
     def fingerprint_info(self) -> dict[str, Any] | None:
         return dict(self._fingerprint) if self._fingerprint else None
@@ -256,11 +315,22 @@ class AccountSession:
             context.on("close", self._on_close)
         except Exception:  # noqa: BLE001
             pass
+        if self._on_x_username:
+            self._x_identity_task = asyncio.create_task(
+                self._monitor_x_identity(), name=f"x-identity:{self.acc}"
+            )
         logger.info("%s CloakBrowser started (extensions=%d)", self.acc, len(extension_paths))
 
     async def close(self) -> dict[str, Any]:
         context, self._context = self._context, None
         self._alive = False
+        identity_task, self._x_identity_task = self._x_identity_task, None
+        if identity_task:
+            identity_task.cancel()
+            try:
+                await identity_task
+            except asyncio.CancelledError:
+                pass
         close_error: str | None = None
         if context is not None:
             try:

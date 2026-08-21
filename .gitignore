@@ -12,3 +12,4 @@ htmlcov/
 **/config/secrets.json
 logs/
 apps/x-ops/data/
+browser-profiles/

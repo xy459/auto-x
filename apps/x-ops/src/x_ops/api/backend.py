@@ -240,16 +240,24 @@ class CoreAdminBackend:
                 continue
             live_browser_ids.add(browser_id)
             existing = known_by_browser_id.get(browser_id) or known.get(browser_id)
+            detected_username = str(browser.get("xUsername") or "").strip().lstrip("@") or None
             if existing is None:
                 await self.account_store.create_account(
                     AccountRecord(
                         id=browser_id,
                         name=str(browser.get("name") or browser.get("display_name") or browser_id),
                         browser_account_id=browser_id,
+                        username=detected_username,
                     )
                 )
-            elif existing.archived:
-                await self.account_store.update_account(existing.id, archived=False)
+            elif existing.archived or (
+                detected_username and detected_username != existing.username
+            ):
+                await self.account_store.update_account(
+                    existing.id,
+                    archived=False,
+                    username=detected_username or existing.username,
+                )
         for account in known_accounts:
             if (
                 account.browser_account_id

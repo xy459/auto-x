@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from ..config import Account, AccountsConfig
+from ..config import Account, AccountsConfig, store
 from .lease import BrowserPageLease
 from .procutil import kill_for_data_dir, process_stats_many
 from .session import AccountSession
@@ -15,8 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class SessionRegistry:
-    def __init__(self, session_factory: Callable[[Account, AccountsConfig], AccountSession] = AccountSession) -> None:
+    def __init__(
+        self,
+        session_factory: Callable[..., AccountSession] = AccountSession,
+        on_x_username: Callable[[str, str], bool] | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._on_x_username = on_x_username
         self._sessions: dict[str, AccountSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -40,7 +45,11 @@ class SessionRegistry:
             # replacing the registry entry with a new session.
             self._sessions.pop(account.acc, None)
             await previous.close()
-        session = self._session_factory(account, config)
+        session = (
+            self._session_factory(account, config, self._on_x_username)
+            if self._on_x_username
+            else self._session_factory(account, config)
+        )
         self._sessions[account.acc] = session
         try:
             await session.start()
@@ -145,4 +154,4 @@ class SessionRegistry:
         return result
 
 
-session_registry = SessionRegistry()
+session_registry = SessionRegistry(on_x_username=store.update_x_username)

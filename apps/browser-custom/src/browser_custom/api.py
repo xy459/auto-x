@@ -120,6 +120,8 @@ def _prepare_account_payload(
     """Merge write-only proxy passwords without ever returning them to the UI."""
     payload = deepcopy(body)
     payload["acc"] = acc
+    if existing and "xUsername" not in payload:
+        payload["xUsername"] = existing.xUsername
     network = payload.get("network")
     if not isinstance(network, dict):
         return payload
@@ -156,6 +158,7 @@ def _mark_stale_network_check(account: Account) -> None:
 def _launch_configuration(account: Account) -> JsonObject:
     """Return account settings that affect the running browser session."""
     payload = account.model_dump(mode="json")
+    payload.pop("xUsername", None)
     network = payload.get("network")
     if isinstance(network, dict):
         network.pop("lastCheck", None)
