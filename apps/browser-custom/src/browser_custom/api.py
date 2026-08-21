@@ -31,13 +31,18 @@ class BrowserBatchRequest(BaseModel):
     accounts: list[str]
 
 
+class AccountBatchCreateRequest(BaseModel):
+    accounts: list[JsonObject] = Field(min_length=1, max_length=500)
+
+
 def _validation_errors(exc: ValidationError) -> list[JsonObject]:
     """Return JSON-safe Pydantic details (ctx may contain raw ValueError objects)."""
     return [dict(item) for item in exc.errors(include_context=False)]
 
 
-def _new_acc_id() -> str:
+def _new_acc_id(reserved: set[str] | None = None) -> str:
     existing = {account.acc for account in store.accounts.accounts}
+    existing.update(reserved or set())
     while True:
         candidate = "acc-" + uuid.uuid4().hex[:8]
         if candidate not in existing:
@@ -243,6 +248,31 @@ def add_account(body: JsonObject) -> JsonObject:
     _mark_stale_network_check(account)
     _save_accounts([*store.accounts.accounts, account])
     return {"ok": True, "account": _public_account(account)}
+
+
+@router.post("/accounts/batch")
+def add_accounts_batch(body: AccountBatchCreateRequest) -> JsonObject:
+    created: list[Account] = []
+    reserved = {account.acc for account in store.accounts.accounts}
+    for line, raw in enumerate(body.accounts, 1):
+        acc = _new_acc_id(reserved)
+        reserved.add(acc)
+        try:
+            account = Account.model_validate(_prepare_account_payload(raw, acc))
+        except ValidationError as exc:
+            raise HTTPException(400, {
+                "line": line,
+                "name": str(raw.get("name") or "").strip() or None,
+                "errors": _validation_errors(exc),
+            }) from exc
+        _mark_stale_network_check(account)
+        created.append(account)
+    _save_accounts([*store.accounts.accounts, *created])
+    return {
+        "ok": True,
+        "count": len(created),
+        "accounts": [_public_account(account) for account in created],
+    }
 
 
 @router.put("/accounts/{acc}")

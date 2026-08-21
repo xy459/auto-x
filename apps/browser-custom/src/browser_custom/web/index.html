@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Browser Custom</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=20260821-1">
 </head>
 <body>
   <main>
@@ -38,6 +38,7 @@
           <button id="batchOpen" disabled>批量打开</button>
           <button id="batchClose" class="ghost" disabled>批量关闭</button>
           <button id="batchRestart" class="ghost" disabled>批量重启</button>
+          <button id="batchAddAccount" class="ghost">批量新增</button>
           <button id="addAccount">新增账户</button>
         </div>
       </div>
@@ -183,6 +184,20 @@
       <datalist id="localeOptions"></datalist>
     </form>
   </dialog>
-  <script src="app.js"></script>
+
+  <dialog id="batchAccountDialog" class="batch-account-dialog">
+    <form method="dialog" id="batchAccountForm">
+      <div class="section-title"><h2>批量新增账户</h2><button type="button" id="closeBatchAccountDialog" class="ghost">关闭</button></div>
+      <label class="batch-account-input">账户列表
+        <textarea id="batchAccounts" rows="14" required placeholder="01&#10;02&#10;03 | socks5://host:port | username | password"></textarea>
+        <small>每行一个账户。只填名称即可；如需代理，可使用“名称 | 代理地址 | 用户名 | 密码”格式。账户目录将根据全局账户目录基路径自动生成。</small>
+      </label>
+      <div class="actions">
+        <button type="submit" id="saveBatchAccounts">批量创建</button>
+      </div>
+      <p id="batchAccountMsg" class="message batch-account-result" aria-live="polite"></p>
+    </form>
+  </dialog>
+  <script src="app.js?v=20260821-1"></script>
 </body>
 </html>

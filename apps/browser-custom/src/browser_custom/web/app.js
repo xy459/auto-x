@@ -24,6 +24,14 @@ async function api(path, init = {}) {
         const message = String(item.msg || "参数无效").replace(/^Value error,\s*/, "");
         return field ? `${field}：${message}` : message;
       }).join("；");
+    } else if (detail && Array.isArray(detail.errors)) {
+      const prefix = detail.line ? `第 ${detail.line} 行${detail.name ? `（${detail.name}）` : ""}` : "批量账户";
+      const errors = detail.errors.map((item) => {
+        const field = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(".") : "";
+        const message = String(item.msg || "参数无效").replace(/^Value error,\s*/, "");
+        return field ? `${field}：${message}` : message;
+      }).join("；");
+      detail = `${prefix}：${errors}`;
     } else if (typeof detail !== "string") {
       const serialized = JSON.stringify(detail);
       detail = serialized && serialized !== "{}" ? serialized : `请求失败（HTTP ${response.status}）`;
@@ -228,6 +236,47 @@ function proposedDir(name) {
   return base ? `${base}${options.sep || "\\"}${safe}` : "";
 }
 
+function parseBatchAccounts() {
+  const lines = $("batchAccounts").value.split(/\r?\n/)
+    .map((value) => value.trim()).filter(Boolean);
+  if (!lines.length) throw new Error("请至少输入一个账户名称");
+  if (lines.length > 500) throw new Error("一次最多批量创建 500 个账户");
+  const knownDirs = new Map(accountCache.map((account) => [account.userDataDir.toLowerCase(), account.name || account.acc]));
+  const batchDirs = new Map();
+  return lines.map((line, index) => {
+    const delimiter = line.includes("\t") ? "\t" : "|";
+    const parts = line.split(delimiter).map((value) => value.trim());
+    const name = parts.shift() || "";
+    const proxyServer = parts.shift() || "";
+    const proxyUsername = parts.shift() || "";
+    const proxyPassword = parts.join(delimiter).trim();
+    if (!name) throw new Error(`第 ${index + 1} 行缺少账户名称`);
+    const userDataDir = proposedDir(name);
+    if (!userDataDir) throw new Error("请先在全局设置中填写并保存账户目录基路径");
+    const dirKey = userDataDir.toLowerCase();
+    if (knownDirs.has(dirKey)) throw new Error(`第 ${index + 1} 行账户目录已被“${knownDirs.get(dirKey)}”使用`);
+    if (batchDirs.has(dirKey)) throw new Error(`第 ${index + 1} 行与第 ${batchDirs.get(dirKey)} 行生成了相同的账户目录`);
+    batchDirs.set(dirKey, index + 1);
+    const account = {name, userDataDir};
+    if (proxyServer) {
+      account.network = {
+        proxy: {server: proxyServer, username: proxyUsername || null, password: proxyPassword || null},
+        regionMode: "auto", strictProxy: true,
+      };
+    } else if (proxyUsername || proxyPassword) {
+      throw new Error(`第 ${index + 1} 行填写了代理凭据，但缺少代理地址`);
+    }
+    return account;
+  });
+}
+
+function openBatchAccountForm() {
+  $("batchAccounts").value = "";
+  $("batchAccountMsg").textContent = "";
+  $("batchAccountDialog").showModal();
+  $("batchAccounts").focus();
+}
+
 function renderNetworkPreview(result = lastNetworkCheck) {
   const preview = $("identityPreview");
   if (!result) {
@@ -382,7 +431,9 @@ function formPayload() {
 $("refresh").onclick = load;
 $("statusRefresh").onclick = refreshStatuses;
 $("addAccount").onclick = () => openForm();
+$("batchAddAccount").onclick = openBatchAccountForm;
 $("closeDialog").onclick = () => $("accountDialog").close();
+$("closeBatchAccountDialog").onclick = () => $("batchAccountDialog").close();
 $("fpPlatformOverride").addEventListener("change", () => updateFingerprintSummary(
   editing ? accountCache.find((account) => account.acc === editing) : null
 ));
@@ -482,6 +533,28 @@ $("accountForm").addEventListener("submit", async (event) => {
     $("accountDialog").close();
     await load();
   } catch (error) { $("formMsg").textContent = error.message; }
+});
+
+$("batchAccountForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("saveBatchAccounts");
+  button.disabled = true;
+  $("batchAccountMsg").textContent = "";
+  try {
+    const accounts = parseBatchAccounts();
+    const result = await api("/api/accounts/batch", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({accounts}),
+    });
+    $("batchAccountDialog").close();
+    $("batchMsg").classList.remove("error");
+    $("batchMsg").textContent = `已批量新增 ${result.count} 个账户`;
+    await load();
+  } catch (error) {
+    $("batchAccountMsg").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $("testNetwork").onclick = async () => {
