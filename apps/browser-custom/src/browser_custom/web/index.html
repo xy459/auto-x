@@ -192,12 +192,16 @@
         <textarea id="batchAccounts" rows="14" required placeholder="01&#10;02&#10;03 | socks5://host:port | username | password"></textarea>
         <small>每行一个账户。只填名称即可；如需代理，可使用“名称 | 代理地址 | 用户名 | 密码”格式。账户目录将根据全局账户目录基路径自动生成。</small>
       </label>
+      <div class="checks">
+        <label><input type="checkbox" id="batchAutoAssignAvatar" checked> 自动分配不同头像</label>
+        <small>仅在新 Profile 首次启动时分配；不会覆盖之后手动选择的头像。</small>
+      </div>
       <div class="actions">
         <button type="submit" id="saveBatchAccounts">批量创建</button>
       </div>
       <p id="batchAccountMsg" class="message batch-account-result" aria-live="polite"></p>
     </form>
   </dialog>
-  <script src="app.js?v=20260821-1"></script>
+  <script src="app.js?v=20260822-1"></script>
 </body>
 </html>

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 _LAUNCH_LOCK = asyncio.Lock()
 _PLAYWRIGHT_DISABLE_EXTENSIONS_ARG = "--disable-extensions"
 _X_PROFILE_SELECTOR = 'a[data-testid="AppTabBar_Profile_Link"]'
+# Chromium 150 exposes these non-placeholder local profile avatars. Keep index 0
+# reserved for Chromium's generic fallback silhouette.
+_PROFILE_AVATAR_INDICES = tuple(range(1, 28))
 _X_RESERVED_PATHS = {
     "account", "compose", "explore", "home", "i", "jobs", "login", "logout",
     "messages", "notifications", "search", "settings", "signup",
@@ -89,19 +93,34 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def _initial_profile_avatar_index(account: Account) -> int:
+    """Choose a stable Chromium avatar for a newly initialized account."""
+    digest = hashlib.sha256(account.display_name.encode("utf-8")).digest()
+    return _PROFILE_AVATAR_INDICES[int.from_bytes(digest[:4], "big") % len(_PROFILE_AVATAR_INDICES)]
+
+
 def _sync_chromium_profile_name(account: Account) -> None:
-    """Keep Chromium's visible profile label aligned with the account name."""
+    """Keep Chromium's label aligned and initialize a new profile avatar once."""
     profile_name = account.display_name
     preferences_path = account.data_dir / "Default" / "Preferences"
+    local_state_path = account.data_dir / "Local State"
+    initialize_avatar = (
+        account.autoAssignAvatar
+        and not preferences_path.exists()
+        and not local_state_path.exists()
+    )
     preferences = _read_json_object(preferences_path)
     profile_preferences = preferences.setdefault("profile", {})
     if not isinstance(profile_preferences, dict):
         profile_preferences = {}
         preferences["profile"] = profile_preferences
     profile_preferences["name"] = profile_name
+    avatar_index: int | None = None
+    if initialize_avatar:
+        avatar_index = _initial_profile_avatar_index(account)
+        profile_preferences["avatar_index"] = avatar_index
     _atomic_write(preferences_path, preferences)
 
-    local_state_path = account.data_dir / "Local State"
     local_state = _read_json_object(local_state_path)
     local_profiles = local_state.setdefault("profile", {})
     if not isinstance(local_profiles, dict):
@@ -117,6 +136,9 @@ def _sync_chromium_profile_name(account: Account) -> None:
         info_cache["Default"] = default_profile
     default_profile["name"] = profile_name
     default_profile["is_using_default_name"] = False
+    if avatar_index is not None:
+        default_profile["avatar_icon"] = f"chrome://theme/IDR_PROFILE_AVATAR_{avatar_index}"
+        default_profile["is_using_default_avatar"] = True
     _atomic_write(local_state_path, local_state)
 
 

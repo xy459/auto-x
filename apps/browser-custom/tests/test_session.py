@@ -57,7 +57,9 @@ def test_sync_chromium_profile_name_preserves_existing_preferences(tmp_path: Pat
         '{"profile":{"info_cache":{"Default":{"name":"Person 1","is_using_default_name":true,"avatar_icon":"avatar"}}},"browser":{"enabled_labs_experiments":["example"]}}',
         encoding="utf-8",
     )
-    account = Account(acc="account-1", name="X主账号", userDataDir=str(profile_dir))
+    account = Account(
+        acc="account-1", name="X主账号", userDataDir=str(profile_dir), autoAssignAvatar=True
+    )
 
     _sync_chromium_profile_name(account)
 
@@ -75,7 +77,9 @@ def test_sync_chromium_profile_name_preserves_existing_preferences(tmp_path: Pat
 
 def test_sync_chromium_profile_name_initializes_new_profile(tmp_path: Path):
     profile_dir = tmp_path / "profile"
-    account = Account(acc="account-1", name="", userDataDir=str(profile_dir))
+    account = Account(
+        acc="account-1", name="", userDataDir=str(profile_dir), autoAssignAvatar=True
+    )
 
     _sync_chromium_profile_name(account)
 
@@ -86,9 +90,13 @@ def test_sync_chromium_profile_name_initializes_new_profile(tmp_path: Path):
         (profile_dir / "Local State").read_text(encoding="utf-8")
     )
     assert preferences["profile"]["name"] == "account-1"
+    avatar_index = preferences["profile"]["avatar_index"]
+    assert 1 <= avatar_index <= 27
     assert local_state["profile"]["info_cache"]["Default"] == {
         "name": "account-1",
         "is_using_default_name": False,
+        "avatar_icon": f"chrome://theme/IDR_PROFILE_AVATAR_{avatar_index}",
+        "is_using_default_avatar": True,
     }
 
 

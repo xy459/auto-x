@@ -127,6 +127,8 @@ def _prepare_account_payload(
     payload["acc"] = acc
     if existing and "xUsername" not in payload:
         payload["xUsername"] = existing.xUsername
+    if existing and "autoAssignAvatar" not in payload:
+        payload["autoAssignAvatar"] = existing.autoAssignAvatar
     network = payload.get("network")
     if not isinstance(network, dict):
         return payload

@@ -237,6 +237,7 @@ function proposedDir(name) {
 }
 
 function parseBatchAccounts() {
+  const autoAssignAvatar = $("batchAutoAssignAvatar").checked;
   const lines = $("batchAccounts").value.split(/\r?\n/)
     .map((value) => value.trim()).filter(Boolean);
   if (!lines.length) throw new Error("请至少输入一个账户名称");
@@ -257,7 +258,7 @@ function parseBatchAccounts() {
     if (knownDirs.has(dirKey)) throw new Error(`第 ${index + 1} 行账户目录已被“${knownDirs.get(dirKey)}”使用`);
     if (batchDirs.has(dirKey)) throw new Error(`第 ${index + 1} 行与第 ${batchDirs.get(dirKey)} 行生成了相同的账户目录`);
     batchDirs.set(dirKey, index + 1);
-    const account = {name, userDataDir};
+    const account = {name, userDataDir, autoAssignAvatar};
     if (proxyServer) {
       account.network = {
         proxy: {server: proxyServer, username: proxyUsername || null, password: proxyPassword || null},
@@ -272,6 +273,7 @@ function parseBatchAccounts() {
 
 function openBatchAccountForm() {
   $("batchAccounts").value = "";
+  $("batchAutoAssignAvatar").checked = true;
   $("batchAccountMsg").textContent = "";
   $("batchAccountDialog").showModal();
   $("batchAccounts").focus();

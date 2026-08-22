@@ -173,6 +173,7 @@ class Account(BaseModel):
     xUsername: str | None = None
     userDataDir: str
     browserPath: str | None = None
+    autoAssignAvatar: bool = False
 
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     geolocation: GeolocationConfig = Field(default_factory=GeolocationConfig)

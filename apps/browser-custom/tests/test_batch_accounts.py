@@ -13,7 +13,11 @@ def test_batch_add_accounts(tmp_path: Path, monkeypatch):
 
     with TestClient(app) as client:
         response = client.post("/api/accounts/batch", json={"accounts": [
-            {"name": "01", "userDataDir": str(tmp_path / "profiles" / "01")},
+            {
+                "name": "01",
+                "userDataDir": str(tmp_path / "profiles" / "01"),
+                "autoAssignAvatar": True,
+            },
             {
                 "name": "02",
                 "userDataDir": str(tmp_path / "profiles" / "02"),
@@ -28,6 +32,7 @@ def test_batch_add_accounts(tmp_path: Path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["count"] == 2
     assert [account.name for account in config_store.accounts.accounts] == ["01", "02"]
+    assert [account.autoAssignAvatar for account in config_store.accounts.accounts] == [True, False]
     assert len({account.acc for account in config_store.accounts.accounts}) == 2
 
 
