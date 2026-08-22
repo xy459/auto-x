@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from x_ops.ai.settings import AIConfigStore
+from x_ops.api import login_jobs
 from x_ops.api.backend import (
     CoreAdminBackend,
     InProcessBrowserCustomClient,
@@ -138,9 +139,12 @@ class FakeBackend:
     async def set_task_enabled(self, task_id, enabled):
         return await self.update_task(task_id, {"enabled": enabled})
 
-    async def trigger_task(self, task_id, trigger):
-        if await self.get_task(task_id) is None:
+    async def trigger_task(self, task_id, trigger, *, fire_key=None):
+        task = await self.get_task(task_id)
+        if task is None:
             return None
+        if not task.get("enabled", True):
+            raise AdminAPIError(409, "cannot trigger a disabled task")
         created = []
         for index, account_id in enumerate(self.tasks[0]["account_ids"], 1):
             run = {
@@ -273,6 +277,69 @@ def test_task_multi_account_run_cancel_and_rerun(tmp_path):
         assert deleted_task.status_code == 200
         assert deleted_task.json()["deleted"] is True
         assert client.delete(f"/api/tasks/{task_id}").status_code == 404
+
+
+def test_login_job_creates_enabled_task_and_runs_for_each_account(tmp_path, monkeypatch):
+    class LoginSecretStore:
+        def __init__(self):
+            self.values = {}
+
+        def set(self, reference, value):
+            self.values[reference] = value
+
+        def get(self, reference):
+            return self.values.get(reference)
+
+        def delete(self, reference):
+            self.values.pop(reference, None)
+
+    secret_store = LoginSecretStore()
+    monkeypatch.setattr(login_jobs.login_secrets, "store", lambda: secret_store)
+    backend, configured = services(tmp_path)
+
+    with TestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/login-jobs",
+            json={
+                "name": "批量登录测试",
+                "credentials": [
+                    {
+                        "account_id": "account-1",
+                        "browser_name": "browser-1",
+                        "username": "user-one",
+                        "password": "password-one",
+                        "totp_secret": "totp-one",
+                    },
+                    {
+                        "account_id": "account-2",
+                        "browser_name": "browser-2",
+                        "username": "user-two",
+                        "password": "password-two",
+                        "totp_secret": "totp-two",
+                    },
+                ],
+                "max_concurrent_runs": 2,
+                "run_now": True,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task"]["enabled"] is True
+    assert payload["task"]["browser_end_policy"] == "close"
+    assert payload["task"]["params"]["max_concurrent_runs"] == 2
+    assert payload["credential_count"] == 2
+    assert {run["account_id"] for run in payload["run"]["runs"]} == {
+        "account-1",
+        "account-2",
+    }
+    assert backend.tasks[0]["enabled"] is True
+    assert sorted(secret_store.values.values()) == [
+        "password-one",
+        "password-two",
+        "totp-one",
+        "totp-two",
+    ]
 
 
 def test_browser_batch_and_runtime_settings(tmp_path):
@@ -543,11 +610,14 @@ async def test_core_backend_creates_one_normal_run_per_account(tmp_path):
             },
             "enabled": True,
             "browser_end_policy": "keep_open",
+            "task_timeout_seconds": 7200,
         }
     )
     triggered = await backend.trigger_task(task["id"], "manual")
     assert triggered is not None
     assert len(triggered["runs"]) == 2
+    deadline = datetime.fromisoformat(triggered["runs"][0]["deadline"])
+    assert (deadline - datetime.now(UTC)).total_seconds() > 7100
     assert len({run["trigger_id"] for run in triggered["runs"]}) == 1
     assert {run["account_id"] for run in triggered["runs"]} == {
         "account-1",

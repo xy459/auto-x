@@ -23,12 +23,14 @@ class BrowserPageLease:
         account: Account,
         session: AccountSession,
         page: Any,
+        reusable_page: bool,
         browser_was_started: bool,
     ) -> None:
         self.account = account
         self.session = session
         self.context = session.context
         self.page = page
+        self.reusable_page = reusable_page
         self.browser_was_started = browser_was_started
         self._owned_pages: list[Any] = [page]
         self._registry = registry
@@ -44,11 +46,15 @@ class BrowserPageLease:
         if not self._released and page not in self._owned_pages:
             self._owned_pages.append(page)
 
-    async def _close_owned_pages(self) -> list[str]:
+    async def _close_owned_pages(self, *, close_primary: bool = True) -> list[str]:
         errors: list[str] = []
         processed: set[int] = set()
         while True:
-            pending = [page for page in reversed(self._owned_pages) if id(page) not in processed]
+            pending = [
+                page
+                for page in reversed(self._owned_pages)
+                if id(page) not in processed and (close_primary or page is not self.page)
+            ]
             if not pending:
                 break
             for page in pending:
@@ -65,13 +71,22 @@ class BrowserPageLease:
             await asyncio.sleep(0)
         return errors
 
-    async def release(self, *, close_browser: bool = False) -> dict[str, Any]:
+    async def release(
+        self,
+        *,
+        close_browser: bool = False,
+        close_page: bool = True,
+    ) -> dict[str, Any]:
         """Release caller-owned pages and optionally close the whole account browser."""
         async with self._release_lock:
             if self._released:
                 return dict(self._release_result or {})
 
-            page_errors = await self._close_owned_pages()
+            preserve_primary = not close_page and self.reusable_page and not close_browser
+            page_errors = await self._close_owned_pages(close_primary=not preserve_primary)
+            release_task_page = getattr(self.session, "release_task_page", None)
+            if callable(release_task_page):
+                release_task_page(self.page, preserve=preserve_primary)
             browser_result: dict[str, Any] | None = None
             if close_browser:
                 try:

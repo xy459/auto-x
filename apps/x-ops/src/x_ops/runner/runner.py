@@ -30,7 +30,7 @@ from ..task_sdk import (
     TaskTimeoutError,
     TaskUncertainError,
 )
-from .concurrency import ExecutionSlotManager
+from .concurrency import ExecutionSlotManager, ScopedExecutionSlotManager
 from .locks import AccountLockManager
 
 
@@ -56,6 +56,7 @@ class TaskRunner:
         logger_factory: TaskLoggerFactory,
         cancellation_factory: CancellationTokenFactory | None = None,
         browser_acquire_timeout_seconds: float = 120.0,
+        scoped_execution_slots: ScopedExecutionSlotManager | None = None,
     ) -> None:
         self.runner_id = runner_id
         self.run_store = run_store
@@ -70,6 +71,7 @@ class TaskRunner:
         if browser_acquire_timeout_seconds <= 0:
             raise ValueError("browser acquire timeout must be positive")
         self.browser_acquire_timeout_seconds = browser_acquire_timeout_seconds
+        self.scoped_execution_slots = scoped_execution_slots or ScopedExecutionSlotManager()
         self.cancellation_factory = cancellation_factory or CancellationTokenFactory(
             run_store.is_cancel_requested
         )
@@ -110,6 +112,42 @@ class TaskRunner:
             await self._finish(run, RunOutcome.failed(exc.error), logger)
             return
 
+        scoped_slot = None
+        max_concurrent_runs = getattr(params, "max_concurrent_runs", None)
+        if max_concurrent_runs is not None:
+            scope_key = run.trigger_id or run.task_id or run.id
+            logger.info(
+                "run_concurrency_waiting",
+                scope_key=scope_key,
+                max_concurrent_runs=max_concurrent_runs,
+            )
+            try:
+                scoped_slot = await cancellation.wait_for(
+                    self.scoped_execution_slots.acquire(scope_key, int(max_concurrent_runs))
+                )
+                logger.info("run_concurrency_acquired", scope_key=scope_key)
+            except TaskCancelledError as exc:
+                await self._finish(run, RunOutcome.cancelled(self._cancel_error(exc)), logger)
+                return
+            except TaskTimeoutError as exc:
+                await self._finish(run, RunOutcome.failed(self._timeout_error(exc)), logger)
+                return
+
+        try:
+            await self._execute_prepared(run, program, params, account, cancellation, logger)
+        finally:
+            if scoped_slot is not None:
+                await scoped_slot.release()
+
+    async def _execute_prepared(
+        self,
+        run: TaskRunSnapshot,
+        program: TaskProgram,
+        params: BaseModel,
+        account: AccountRecord,
+        cancellation: CancellationToken,
+        logger: TaskLogger,
+    ) -> None:
         logger.info("account_lock_waiting")
         assert account.browser_account_id is not None
         try:
@@ -277,7 +315,16 @@ class TaskRunner:
                 )
             logger.info("program_started")
             outcome = await self._invoke(program, context, params)
-            logger.info("program_finished", status=outcome.status.value)
+            finish_fields: dict[str, Any] = {"status": outcome.status.value}
+            if outcome.error is not None:
+                finish_fields.update(
+                    error_code=outcome.error.code,
+                    error_message=outcome.error.message,
+                    error_source=outcome.error.source,
+                    retryable=outcome.error.retryable,
+                    error_details=dict(outcome.error.details),
+                )
+            logger.info("program_finished", **finish_fields)
         except _PreparationError as exc:
             outcome = RunOutcome.failed(exc.error)
         except TaskCancelledError as exc:
@@ -290,10 +337,22 @@ class TaskRunner:
             outcome = self._exception_outcome(exc)
         finally:
             if lease is not None:
-                logger.info("cleanup_started")
+                preserve_uncertain = bool(
+                    outcome is not None
+                    and outcome.status is RunStatus.UNCERTAIN
+                    and program.SPEC.preserve_browser_on_uncertain
+                )
+                close_browser = bool(
+                    run.browser_end_policy.value == "close" and not preserve_uncertain
+                )
+                logger.info(
+                    "cleanup_started",
+                    close_browser=close_browser,
+                    preserve_uncertain=preserve_uncertain,
+                )
                 cleanup = await self._safe_cleanup(
                     lease,
-                    close_browser=run.browser_end_policy.value == "close",
+                    close_browser=close_browser,
                 )
                 logger.info("cleanup_finished", warnings=list(cleanup.warnings))
         if outcome is not None:
@@ -347,7 +406,15 @@ class TaskRunner:
 
     async def _safe_cleanup(self, lease: BrowserLease, *, close_browser: bool) -> CleanupReport:
         try:
-            return await lease.release(close_browser=close_browser)
+            try:
+                return await lease.release(
+                    close_browser=close_browser,
+                    close_page=close_browser,
+                )
+            except TypeError as exc:
+                if "close_page" not in str(exc):
+                    raise
+                return await lease.release(close_browser=close_browser)
         except Exception as exc:
             return CleanupReport(
                 ({"code": "BROWSER_LEASE_RELEASE_FAILED", "message": str(exc)},)

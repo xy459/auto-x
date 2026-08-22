@@ -38,6 +38,10 @@ _FAILURE_DESCRIPTIONS = {
     "SUBMISSION_REJECTED": "X explicitly rejected the submission.",
     "SUBMISSION_RESULT_UNKNOWN": "A live write was triggered but its final state could not be confirmed.",
     "BROWSER_CLOSED_DURING_RUN": "The caller-owned browser or page closed during the action.",
+    "LOGIN_CHALLENGE_REQUIRED": "X requested an additional verification step that requires operator input.",
+    "LOGIN_CREDENTIALS_REJECTED": "X rejected the supplied login identifier or password.",
+    "TOTP_CODE_REJECTED": "X rejected the submitted two-factor authentication code.",
+    "TOTP_CODE_UNAVAILABLE": "A fresh two-factor authentication code was not available before timeout.",
 }
 _RETRYABLE = {"IDEMPOTENCY_IN_PROGRESS", "STATE_UNKNOWN", "TIMEOUT", "ELEMENT_NOT_VISIBLE", "ELEMENT_BLOCKED", "PROFILE_LOAD_FAILED", "PROFILE_LOADING_TIMEOUT"}
 
@@ -59,6 +63,7 @@ _SPECS: tuple[tuple[Any, ...], ...] = (
     ("timeline.open", "Open timeline", "timeline_open", "read", "safe", "none", False, False, False, False, None, BASE + ("CONTENT_MISMATCH", "TARGET_NOT_FOUND", "ELEMENT_NOT_VISIBLE", "ELEMENT_DISABLED", "ELEMENT_BLOCKED", "TIMEOUT"), "invalid feed; Home navigation is two-phase; tab selection must be verified"),
     ("timeline.browse", "Browse timeline", "timeline_browse", "read", "safe", "none", False, False, False, False, None, BASE + ("CONTENT_MISMATCH",) + CLICK[2:], "bounded duration/scroll count; cancellation; changing virtual-list height"),
     ("timeline.collect", "Browse and collect", "timeline_collect", "read", "safe", "none", False, False, False, False, None, BASE + ("CONTENT_MISMATCH",) + CLICK[2:], "deduplicate virtualized posts; ad filtering; media/quote ownership; bounded Show more"),
+    ("timeline.refreshNew", "Refresh new posts", "timeline_refresh_new", "read", "safe", "none", False, False, False, False, None, BASE + ("CONTENT_MISMATCH", "PAGE_UNSUPPORTED", "TARGET_NOT_FOUND", "ELEMENT_NOT_VISIBLE", "ELEMENT_DISABLED", "ELEMENT_BLOCKED", "TIMEOUT"), "tab-first refresh; optional low-frequency Home jump; Show posts clicked only when visible"),
     ("post.openDetails", "Open post details", "post_open_details", "read", "safe", "tweet", False, True, False, False, None, TARGET, "canonical main-post URL only; navigation is reported, not disguised as completion"),
     ("post.getDetails", "Get post details", "post_get_details", "read", "safe", "tweet", False, True, False, False, None, TARGET, "localized metrics; quote/media ownership; content-only posts; ads excluded by default"),
     ("post.getType", "Classify direct/quote", "post_get_type", "read", "safe", "tweet", False, True, False, False, None, TARGET, "reply and repost banners are not quote posts; missing quoted identity is retained"),
@@ -101,10 +106,14 @@ _SPECS: tuple[tuple[Any, ...], ...] = (
     ("browse.scrollComments", "Scroll comments", "browse_scroll_comments", "read", "safe", "none", False, False, False, False, None, BASE + ("PAGE_UNSUPPORTED", "STATE_UNKNOWN"), "detail page only; bounded scroll; Discover more and lazy loading"),
     ("browse.wait", "Wait", "browse_wait", "read", "safe", "none", False, False, False, False, None, BASE, "duration clamped; cancellation-aware; waiting does not assert element readiness"),
     ("account.search", "Search account", "account_search", "read", "safe", "none", False, False, False, False, None, BASE + ("CONTENT_MISMATCH",), "safe handle navigates directly; names use People search; two-phase navigation"),
+    ("account.login", "Log in account", "account_login", "write", "never", "none", False, False, False, False, None, COMPOSER + ("LOGIN_CHALLENGE_REQUIRED", "LOGIN_CREDENTIALS_REJECTED", "TOTP_CODE_REJECTED", "TOTP_CODE_UNAVAILABLE", "STATE_UNKNOWN"), "credential fields are never returned; rejected TOTP codes retry once with a fresh code; captcha or extra verification is reported for operator handling"),
     ("account.getSession", "Get signed-in session", "account_get_session", "read", "safe", "none", False, False, False, False, None, BASE + ("STATE_UNKNOWN",), "explicit signed-out versus unknown; account switcher/profile link evidence"),
     ("account.getDetails", "Get account details", "account_get_details", "read", "safe", "profile", False, False, False, False, None, BASE + ("CONTENT_MISMATCH", "PAGE_UNSUPPORTED", "ACCOUNT_NOT_FOUND", "ACCOUNT_SUSPENDED", "ACCOUNT_TEMPORARILY_RESTRICTED", "ACCOUNT_MISMATCH", "PROFILE_LOAD_FAILED", "PROFILE_LOADING_TIMEOUT", "PROFILE_STATE_UNKNOWN"), "renamed handle redirects; private/suspended/missing/loading states; scoped profile header"),
     ("account.listCandidates", "List account candidates", "account_list_candidates", "read", "safe", "none", False, False, False, False, None, BASE + ("PAGE_UNSUPPORTED", "STATE_UNKNOWN"), "People results only; virtualized cards; deduplicate handles; exclude side recommendations"),
+    ("account.listPosts", "List profile posts", "account_list_posts", "read", "safe", "profile", False, False, False, False, None, BASE + ("PAGE_UNSUPPORTED", "PROFILE_STATE_UNKNOWN"), "current profile only; visible posts; excludes ads and other authors; optional reply and pinned filtering"),
+    ("account.scrollPosts", "Scroll profile posts", "account_scroll_posts", "read", "safe", "profile", False, False, False, False, None, BASE + ("PAGE_UNSUPPORTED", "STATE_UNKNOWN"), "current profile only; bounded single scroll; page boundary is a normal skip"),
     ("account.follow", "Follow profile", "account_follow", "write", "never", "profile", True, False, False, False, None, WRITE + ("PAGE_UNSUPPORTED",), "current profile only; self target rejected; following/requested skips; verify relationship"),
+    ("account.followHandle", "Follow account by handle", "account_follow_handle", "write", "never", "none", True, False, False, False, None, WRITE + ("CONTENT_MISMATCH", "ACCOUNT_NOT_FOUND", "ACCOUNT_SUSPENDED", "ACCOUNT_TEMPORARILY_RESTRICTED", "ACCOUNT_MISMATCH", "PROFILE_LOAD_FAILED", "PROFILE_LOADING_TIMEOUT", "PROFILE_STATE_UNKNOWN"), "opens an isolated temporary profile page; preserves the caller timeline; exact handle only; always closes the temporary page"),
     ("account.unfollow", "Unfollow profile", "account_unfollow", "write", "never", "profile", True, False, False, False, None, WRITE + ("PAGE_UNSUPPORTED",), "current profile only; confirm dialog re-located; verify relationship"),
     ("publish.post", "Publish post", "publish_post", "write", "never", "composer", False, False, False, False, None, COMPOSER + ("MEDIA_TOO_LARGE",), "empty content; media constraints; existing draft; editor state sync; uncertain after final click"),
     ("publish.schedule", "Schedule post", "publish_schedule", "write", "never", "composer", False, False, False, False, None, COMPOSER + ("INVALID_SCHEDULE_TIME", "MEDIA_TOO_LARGE"), "future local time; labeled schedule controls; media/draft/editor sync; uncertain after final click"),
@@ -131,11 +140,38 @@ def _schema(action_id: str, target: str) -> tuple[dict[str, Any], dict[str, Any]
     if action_id.startswith("timeline."):
         properties.update({"feed": {"enum": ["for-you", "following"]}, "maxScrolls": {"type": "integer", "minimum": 0, "maximum": 100}, "durationMs": {"type": "integer", "minimum": 0, "maximum": 60000}})
         required.append("feed")
+    if action_id == "timeline.refreshNew":
+        properties.update({
+            "strategy": {"enum": ["tab_first", "home_show", "none"]},
+            "homeFallback": {"type": "boolean"},
+            "settleMs": {"type": "integer", "minimum": 500, "maximum": 30000},
+        })
     if action_id == "account.search":
         properties["query"] = {"type": "string", "minLength": 1}
         required.append("query")
-    if action_id == "account.getDetails":
+    if action_id == "account.login":
+        properties.update({
+            "username": {"type": "string", "minLength": 1},
+            "password": {"type": "string", "minLength": 1},
+            "totpSecret": {"type": "string"},
+            "twoFactorCode": {"type": "string", "pattern": r"^\d{6,8}$"},
+            "expectedUsername": {"type": "string"},
+            "stepDelayMs": {"type": "integer", "minimum": 500, "maximum": 30000},
+            "typingDelayMs": {"type": "integer", "minimum": 20, "maximum": 500},
+        })
+        required.extend(["username", "password"])
+    if action_id in {"account.getDetails", "account.followHandle"}:
         properties["handle"] = {"type": "string"}
+        if action_id == "account.followHandle":
+            required.append("handle")
+    if action_id == "account.listPosts":
+        properties.update({
+            "maxPosts": {"type": "integer", "minimum": 1, "maximum": 50},
+            "includeReplies": {"type": "boolean"},
+            "includePinned": {"type": "boolean"},
+        })
+    if action_id == "account.scrollPosts":
+        properties["distance"] = {"type": "integer", "minimum": 200, "maximum": 3000}
     if action_id == "publish.post":
         properties.update({"text": {"type": "string"}, "media": {"type": "array"}})
     if action_id == "publish.schedule":

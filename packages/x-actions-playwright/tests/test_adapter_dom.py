@@ -7,6 +7,7 @@ import pytest
 
 from x_actions_playwright import ActionError, XActions
 from x_actions_playwright.adapter import XAdapter
+from x_actions_playwright.models import ExecutionOptions
 
 
 def tweet_html(post_id="100", username="alice", *, liked=False, quote=False, ad=False, own=False):
@@ -66,6 +67,27 @@ async def test_like_uses_target_state_and_never_quote_button(page):
     assert await page.locator('[data-testid="quoteTweet"] [data-testid="like"]').count() == 1
     second = await actions.interaction.like(page, {"tweetId": "100"}, {"confirmLive": True})
     assert second.status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_profile_posts_exclude_other_authors_replies_and_pinned_by_default(page):
+    await page.route("https://x.com/**", lambda route: route.fulfill(status=200, body="<html></html>"))
+    await page.goto("https://x.com/alice")
+    reply = tweet_html(post_id="100", username="alice").replace(
+        '<article data-testid="tweet">',
+        '<article data-testid="tweet"><div>Replying to @bob</div>',
+        1,
+    )
+    await page.set_content(
+        reply
+        + tweet_html(post_id="101", username="alice")
+        + tweet_html(post_id="200", username="bob")
+    )
+    result = await XActions().account.listPosts(
+        page,
+        {"includeReplies": False, "includePinned": False},
+    )
+    assert [post["postId"] for post in result.data["posts"]] == ["101"]
 
 
 @pytest.mark.asyncio
@@ -148,6 +170,43 @@ async def test_reply_dry_run_does_not_open_or_mutate_composer(page):
 
 
 @pytest.mark.asyncio
+async def test_reply_uses_reused_visible_dialog_composer_not_background_editor(page):
+    await page.set_content(
+        tweet_html()
+        + """
+        <section id="background-composer">
+          <div data-testid="tweetTextarea_0" contenteditable="true">existing draft</div>
+          <button data-testid="tweetButtonInline">Post</button>
+        </section>
+        <div id="reply-dialog" role="dialog" hidden>
+          <div id="reply-editor" data-testid="tweetTextarea_0" contenteditable="true"></div>
+          <button id="reply-submit" data-testid="tweetButton">Reply</button>
+        </div>
+        <script>
+          document.querySelector('article > [data-testid=reply]').onclick = () => {
+            document.querySelector('#reply-dialog').hidden = false;
+          };
+          document.querySelector('#reply-submit').onclick = () => {
+            const editor = document.querySelector('#reply-editor');
+            document.body.dataset.submittedReply = editor.innerText;
+            editor.innerText = '';
+            document.querySelector('#reply-dialog').hidden = true;
+          };
+        </script>
+        """
+    )
+
+    await XActions().interaction.reply(
+        page,
+        {"tweetId": "100", "text": "generated reply"},
+        {"confirmLive": True, "timeoutMs": 2_000},
+    )
+
+    assert await page.locator("body").get_attribute("data-submitted-reply") == "generated reply"
+    assert await page.locator("#background-composer [contenteditable=true]").inner_text() == "existing draft"
+
+
+@pytest.mark.asyncio
 async def test_ad_target_fails_closed(page):
     await page.set_content(tweet_html(ad=True))
     with pytest.raises(ActionError) as caught:
@@ -220,6 +279,49 @@ async def test_account_session_distinguishes_signed_in_and_out(page):
     await page.set_content('<a href="/i/flow/login">Log in</a>')
     signed_out = await XActions().account.getSession(page)
     assert signed_out.data["session"]["state"] == "unauthenticated"
+
+
+@pytest.mark.asyncio
+async def test_login_fills_segmented_two_factor_inputs(page):
+    await page.set_content(
+        """
+        <div role="dialog">
+          <input inputmode="numeric" maxlength="1">
+          <input inputmode="numeric" maxlength="1">
+          <input inputmode="numeric" maxlength="1">
+          <input inputmode="numeric" maxlength="1">
+          <input inputmode="numeric" maxlength="1">
+          <input inputmode="numeric" maxlength="1">
+          <button>続ける</button>
+        </div>
+        """
+    )
+    adapter = XAdapter()
+    inputs = page.locator('input[inputmode="numeric"]')
+
+    await adapter._fill_two_factor_code(
+        page,
+        inputs.first,
+        "123456",
+        ExecutionOptions(timeout_ms=2_000),
+        typing_delay_ms=20,
+    )
+
+    assert [await inputs.nth(index).input_value() for index in range(6)] == list("123456")
+    assert await adapter._click_button_by_name(
+        page,
+        ["続ける"],
+        ExecutionOptions(timeout_ms=2_000),
+    )
+
+
+@pytest.mark.asyncio
+async def test_login_recognizes_japanese_account_not_found(page):
+    await page.set_content(
+        "<main>そのユーザー名を使用している有効なアカウントが見つかりません。</main>"
+    )
+
+    assert await XAdapter()._login_challenge_reason(page) == "credentials_rejected"
 
 
 @pytest.mark.asyncio

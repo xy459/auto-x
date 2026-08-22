@@ -56,3 +56,63 @@ class ExecutionSlotManager:
         async with self._condition:
             self._active -= 1
             self._condition.notify_all()
+
+
+@dataclass(slots=True)
+class ScopedExecutionSlot:
+    _owner: ScopedExecutionSlotManager
+    _key: str
+    _slot: ExecutionSlot
+    released: bool = False
+
+    async def __aenter__(self) -> ScopedExecutionSlot:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        await self.release()
+
+    async def release(self) -> None:
+        if self.released:
+            return
+        self.released = True
+        await self._slot.release()
+        await self._owner._release_user(self._key)
+
+
+@dataclass(slots=True)
+class _ScopedState:
+    manager: ExecutionSlotManager
+    users: int = 0
+
+
+class ScopedExecutionSlotManager:
+    """Limit runs that belong to the same trigger without affecting other tasks."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._states: dict[str, _ScopedState] = {}
+
+    async def acquire(self, key: str, limit: int) -> ScopedExecutionSlot:
+        if limit < 1:
+            raise ValueError("scoped execution slot limit must be positive")
+        async with self._lock:
+            state = self._states.get(key)
+            if state is None:
+                state = _ScopedState(ExecutionSlotManager(limit))
+                self._states[key] = state
+            state.users += 1
+        try:
+            slot = await state.manager.acquire()
+        except BaseException:
+            await self._release_user(key)
+            raise
+        return ScopedExecutionSlot(self, key, slot)
+
+    async def _release_user(self, key: str) -> None:
+        async with self._lock:
+            state = self._states.get(key)
+            if state is None:
+                return
+            state.users -= 1
+            if state.users == 0:
+                self._states.pop(key, None)

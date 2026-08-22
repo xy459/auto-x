@@ -91,7 +91,14 @@ class SessionRegistry:
             )
             session = await self._ensure_started_locked(account, config)
             try:
-                page = await session.new_page()
+                acquire_task_page = getattr(session, "acquire_task_page", None)
+                if callable(acquire_task_page):
+                    page, reusable_page = await acquire_task_page()
+                else:
+                    # Preserve compatibility with custom Session factories that
+                    # implement the original ``new_page`` interface only.
+                    page = await session.new_page()
+                    reusable_page = False
             except BaseException:
                 if browser_was_started:
                     self._sessions.pop(account.acc, None)
@@ -102,6 +109,7 @@ class SessionRegistry:
                 account=account,
                 session=session,
                 page=page,
+                reusable_page=reusable_page,
                 browser_was_started=browser_was_started,
             )
 

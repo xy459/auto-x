@@ -33,6 +33,11 @@ class Params(BaseModel):
     fixed_reply: str | None = Field(default=None, max_length=280)
     ai_template: str = "reply_to_post"
     max_replies: int = Field(default=3, ge=1, le=50)
+    timeline_ready_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    collect_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    collect_retry_count: int = Field(default=2, ge=0, le=5)
+    stalled_scroll_retry_count: int = Field(default=3, ge=0, le=10)
+    interaction_timeout_seconds: float = Field(default=30, ge=10, le=120)
 
     @model_validator(mode="after")
     def fixed_mode_has_text(self) -> Self:
@@ -88,7 +93,9 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                 await context.actions.interaction.reply(
                     {"tweetId": tweet_id, "text": text},
                     options=write_options(
-                        context, f"reply:{context.account.account_id}:{tweet_id}"
+                        context,
+                        f"reply:{context.account.account_id}:{tweet_id}",
+                        timeout_ms=int(params.interaction_timeout_seconds * 1_000),
                     ),
                 ),
                 task_run_id=context.cancellation.task_run_id,
@@ -108,10 +115,16 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
         interval_seconds=params.scroll_interval_seconds,
         distance=params.scroll_distance,
         handle_batch=handle_batch,
+        timeline_ready_timeout_seconds=params.timeline_ready_timeout_seconds,
+        collect_timeout_seconds=params.collect_timeout_seconds,
+        collect_retry_count=params.collect_retry_count,
+        stalled_scroll_retry_count=params.stalled_scroll_retry_count,
     )
     return {
         "posts_seen": summary["postsSeen"],
         "matched": matched,
         "replied": replied,
         "skipped": skipped,
+        "scrolls_completed": summary["scrolls"],
+        "stop_reason": summary["stopReason"],
     }

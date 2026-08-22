@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>X Ops 管理后台</title>
-  <link rel="stylesheet" href="/assets/style.css?v=20260820-2">
+  <link rel="stylesheet" href="/assets/style.css?v=20260822-2">
 </head>
 <body>
   <div class="app-shell">
@@ -13,6 +13,7 @@
       <nav id="nav">
         <button data-page="dashboard" class="active">概览</button>
         <button data-page="accounts">账户与浏览器</button>
+        <button data-page="login">批量登录</button>
         <button data-page="tasks">任务管理</button>
         <button data-page="runs">运行记录</button>
         <button data-page="programs">任务程序</button>
@@ -45,11 +46,48 @@
         </article>
       </section>
 
+      <section class="page" id="page-login">
+        <div class="grid two">
+          <article class="panel">
+            <div class="panel-head"><div><h2>批量登录 X</h2><p>每行一个账户，提交后创建登录 TaskRun，密码和 2FA 密钥只写入本地 secret store。</p></div></div>
+            <form id="loginJobForm">
+              <label>任务名称<input id="loginJobName" value="批量登录 X 账号" maxlength="160"></label>
+              <label>账号数据<textarea id="loginCredentials" class="code" rows="12" placeholder="account_id,browser_name,username,password,totp_secret&#10;acc-xxxx,浏览器名称,user@example.com,password,BASE32SECRET"></textarea></label>
+              <div class="grid two compact"><label>同时登录账号数<input id="loginMaxConcurrent" type="number" min="1" max="20" value="1"></label><label>每个账号登录前等待（秒）<span class="grid two compact"><input id="loginDelayMin" type="number" min="0" max="3600" value="180" aria-label="最小等待秒数"><input id="loginDelayMax" type="number" min="0" max="7200" value="480" aria-label="最大等待秒数"></span></label></div>
+              <div class="grid two compact"><label>步骤等待（毫秒）<input id="loginStepDelay" type="number" min="500" max="30000" value="1800"></label><label>输入延迟（毫秒/字符）<input id="loginTypingDelay" type="number" min="20" max="500" value="85"></label></div>
+              <div class="grid two compact"><label>登录超时（毫秒）<input id="loginTimeout" type="number" min="10000" max="120000" value="120000"></label><label>成功后删除凭据<select id="loginDeleteSecrets"><option value="true">是</option><option value="false">否</option></select></label></div>
+              <div class="form-actions"><button type="submit">创建并开始</button><button type="button" class="secondary" id="generateLoginTemplate">生成模板</button><button type="button" class="secondary" id="previewLoginRows">预览解析</button></div>
+            </form>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><h2>解析结果</h2></div>
+            <div id="loginPreview" class="empty">粘贴账号数据后可预览。</div>
+          </article>
+        </div>
+      </section>
+
       <section class="page" id="page-tasks">
         <div class="grid task-layout">
           <article class="panel">
-            <div class="panel-head"><div><h2>任务列表</h2><p>Task 是可重复运行的配置；状态仅为启用或停用。</p></div><button id="newTask">创建任务</button></div>
+            <div class="panel-head"><div><h2>任务列表</h2><p>Task 是可重复运行的配置；状态仅为启用或停用。</p></div><div class="actions"><button id="newTask">创建任务</button><button id="openBatchTask" class="secondary">分批创建</button></div></div>
             <div id="tasksTable"></div>
+          </article>
+          <article class="panel form-panel" id="batchTaskEditor">
+            <div class="panel-head"><h2>分批创建任务</h2><button class="quiet" id="closeBatchTaskEditor">关闭</button></div>
+            <form id="batchTaskForm">
+              <label>任务名前缀<input id="batchTaskNamePrefix" value="分批任务" required maxlength="120"></label>
+              <label>任务程序<select id="batchTaskProgram" required></select></label>
+              <div id="batchProgramHelp" class="help"></div>
+              <fieldset><legend>账户</legend><label class="check-list-select-all"><input type="checkbox" id="batchSelectAll"> 全选</label><div id="batchAccounts" class="check-list"></div></fieldset>
+              <label>业务参数（JSON）<textarea id="batchTaskParams" class="code" rows="8">{}</textarea></label>
+              <div id="batchSchemaHelp" class="schema-help"></div>
+              <div class="grid two compact"><label>每批账号数<input id="batchSize" type="number" min="1" max="100" value="10"></label><label>循环间隔（分钟）<input id="batchIntervalMinutes" type="number" min="1" max="10080" value="120"></label></div>
+              <div class="grid two compact"><label>循环波动（分钟）<input id="batchJitterMinutes" type="number" min="0" max="1440" value="15"></label><label>批次间隔随机（分钟）<span class="grid two compact"><input id="batchSpacingMin" type="number" min="0" max="1440" value="20" aria-label="批次最小间隔"><input id="batchSpacingMax" type="number" min="0" max="1440" value="40" aria-label="批次最大间隔"></span></label></div>
+              <div class="grid two compact"><label>首批启动延迟（分钟）<span class="grid two compact"><input id="batchFirstDelayMin" type="number" min="0" max="1440" value="0" aria-label="首批最小延迟"><input id="batchFirstDelayMax" type="number" min="0" max="1440" value="5" aria-label="首批最大延迟"></span></label><label>浏览器结束策略<select id="batchBrowserPolicy"><option value="keep_open">保持打开</option><option value="close">任务后关闭</option></select></label></div>
+              <label>创建后状态<select id="batchEnabled"><option value="true">启用定时</option><option value="false">暂停</option></select></label>
+              <div class="form-actions"><button type="button" id="previewBatchTasks" class="secondary">预览批次</button><button type="submit">创建分批任务</button></div>
+            </form>
+            <div id="batchPreview" class="empty">选择任务程序和账户后可预览。</div>
           </article>
           <article class="panel form-panel" id="taskEditor">
             <div class="panel-head"><h2 id="taskFormTitle">创建任务</h2><button class="quiet" id="closeTaskEditor">关闭</button></div>
@@ -96,6 +134,6 @@
       </section>
     </main>
   </div>
-  <script src="/assets/app.js?v=20260821-2"></script>
+  <script src="/assets/app.js?v=20260822-2"></script>
 </body>
 </html>

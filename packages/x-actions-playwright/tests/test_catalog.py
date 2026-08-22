@@ -6,21 +6,21 @@ from x_actions_playwright import ACTION_CATEGORIES, ACTION_DEFINITIONS, XActions
 
 EXPECTED_ACTIONS = {
     "context.inspect", "context.selectPost",
-    "timeline.open", "timeline.browse", "timeline.collect",
+    "timeline.open", "timeline.browse", "timeline.collect", "timeline.refreshNew",
     "post.openDetails", "post.getDetails", "post.getType", "post.delete", "post.exitDetails", "post.expand", "post.getUrl", "post.copyLink",
     "image.open", "image.previous", "image.next", "image.close",
     "video.play", "video.pause", "video.unmute", "video.mute",
     "comment.listVisible", "comment.collect", "comment.get", "comment.like", "comment.unlike", "comment.reply", "comment.quote", "comment.deleteReply",
     "interaction.reply", "interaction.quote", "interaction.like", "interaction.unlike", "interaction.bookmark", "interaction.repost", "interaction.undoRepost", "interaction.sendViaChat",
     "browse.scrollTimeline", "browse.openForYou", "browse.openFollowing", "browse.browseForYou", "browse.browseFollowing", "browse.browseAndCollectForYou", "browse.browseAndCollectFollowing", "browse.scrollComments", "browse.wait",
-    "account.search", "account.getSession", "account.getDetails", "account.listCandidates", "account.follow", "account.unfollow",
+    "account.search", "account.login", "account.getSession", "account.getDetails", "account.listCandidates", "account.listPosts", "account.scrollPosts", "account.follow", "account.followHandle", "account.unfollow",
     "publish.post", "publish.schedule", "message.replyConversation",
 }
 
 
-def test_catalog_has_all_55_canonical_actions_and_11_categories():
+def test_catalog_has_all_60_canonical_actions_and_11_categories():
     assert set(ACTION_DEFINITIONS) == EXPECTED_ACTIONS
-    assert len(ACTION_DEFINITIONS) == 55
+    assert len(ACTION_DEFINITIONS) == 60
     assert set(ACTION_CATEGORIES) == {action.split(".", 1)[0] for action in EXPECTED_ACTIONS}
     assert len(ACTION_CATEGORIES) == 11
 

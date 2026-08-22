@@ -135,6 +135,8 @@ class AccountSession:
         self._fingerprint: dict[str, Any] | None = None
         self._on_x_username = on_x_username
         self._x_identity_task: asyncio.Task[None] | None = None
+        self._task_page: Any | None = None
+        self._task_page_in_use = False
 
     def is_alive(self) -> bool:
         return self._context is not None and self._alive
@@ -150,6 +152,41 @@ class AccountSession:
         """Create a caller-owned page while keeping profile state in this context."""
         return await self.context.new_page()
 
+    async def acquire_task_page(self) -> tuple[Any, bool]:
+        """Return the reusable account task page or an isolated concurrent page.
+
+        x-ops serializes tasks for one browser profile, so the normal path keeps
+        one X page alive between ``keep_open`` runs. A defensive concurrent
+        acquisition still receives its own ephemeral page instead of sharing a
+        live Playwright Page with another caller.
+        """
+        page = self._task_page
+        if page is not None:
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                self._task_page = None
+                self._task_page_in_use = False
+                page = None
+        if page is not None and not self._task_page_in_use:
+            self._task_page_in_use = True
+            await page.bring_to_front()
+            return page, True
+        if page is None:
+            page = await self.context.new_page()
+            self._task_page = page
+            self._task_page_in_use = True
+            return page, True
+        return await self.context.new_page(), False
+
+    def release_task_page(self, page: Any, *, preserve: bool) -> None:
+        """Return the reusable task page to the session after a lease ends."""
+        if page is not self._task_page:
+            return
+        self._task_page_in_use = False
+        is_closed = getattr(page, "is_closed", None)
+        if not preserve or (callable(is_closed) and is_closed()):
+            self._task_page = None
+
     async def bring_to_front(self) -> bool:
         """Raise this account's existing browser window for a manual open action."""
         context = self.context
@@ -163,6 +200,8 @@ class AccountSession:
 
     def _on_close(self, *_args: object) -> None:
         self._alive = False
+        self._task_page = None
+        self._task_page_in_use = False
         if self._x_identity_task:
             self._x_identity_task.cancel()
         logger.info("%s browser context closed", self.acc)

@@ -7,3 +7,5 @@ class ProgramSpec:
     version: str
     title: str
     description: str
+    preserve_browser_on_uncertain: bool = False
+    supports_batch_schedule: bool = True

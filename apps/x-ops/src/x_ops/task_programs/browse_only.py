@@ -19,6 +19,8 @@ class Params(BaseModel):
     scroll_count: int = Field(default=10, ge=1, le=100)
     scroll_interval_seconds: float = Field(default=1.5, ge=0.25, le=10)
     scroll_distance: int = Field(default=650, ge=200, le=3000)
+    timeline_ready_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    stalled_scroll_retry_count: int = Field(default=3, ge=0, le=10)
 
 
 # 完整执行流程：
@@ -41,9 +43,15 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
         scroll_count=params.scroll_count,
         interval_seconds=params.scroll_interval_seconds,
         distance=params.scroll_distance,
+        timeline_ready_timeout_seconds=params.timeline_ready_timeout_seconds,
+        stalled_scroll_retry_count=params.stalled_scroll_retry_count,
     )
     await context.cancellation.raise_if_cancelled()
     data = result_data(result)
     completed = int(data.get("scrolls", 0))
     context.logger.info("浏览时间线完成", scrolls_completed=completed)
-    return {"feed": params.feed, "scrolls_completed": completed}
+    return {
+        "feed": params.feed,
+        "scrolls_completed": completed,
+        "stop_reason": data.get("stopReason", "unknown"),
+    }

@@ -577,7 +577,12 @@ class CoreAdminBackend:
                     or runtime.get("default_browser_end_policy", "keep_open")
                 ),
                 deadline=utc_now()
-                + timedelta(seconds=int(runtime.get("default_task_timeout_seconds", 3600))),
+                + timedelta(
+                    seconds=int(
+                        meta.get("task_timeout_seconds")
+                        or runtime.get("default_task_timeout_seconds", 3600)
+                    )
+                ),
                 fire_key=fire_key,
             )
         except KeyError:
@@ -687,7 +692,12 @@ class CoreAdminBackend:
         settings = self.task_metadata.get()
         tasks = dict(settings.get("tasks", {}))
         current = dict(tasks.get(task_id, {}))
-        for key in ("description", "schedule", "browser_end_policy"):
+        for key in (
+            "description",
+            "schedule",
+            "browser_end_policy",
+            "task_timeout_seconds",
+        ):
             if key in payload:
                 current[key] = payload[key]
         tasks[task_id] = current

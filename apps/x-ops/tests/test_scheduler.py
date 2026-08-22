@@ -68,3 +68,59 @@ async def test_scheduler_does_not_advance_json_fire_key_when_trigger_fails():
     assert backend.updated == []
     assert await scheduler.poll_once(now) == ["task-1"]
     assert backend.updated[0][1]["schedule"]["last_fire_key"] == "cron:2026-08-20T09:30"
+
+
+async def test_interval_with_jitter_initializes_next_run_without_immediate_fire(monkeypatch):
+    class IntervalBackend(ScheduledBackend):
+        async def list_tasks(self, _filters):
+            return [
+                {
+                    "id": "task-1",
+                    "enabled": True,
+                    "schedule": {
+                        "type": "interval",
+                        "interval_seconds": 4800,
+                        "jitter_seconds": 600,
+                        "enabled": True,
+                    },
+                }
+            ]
+
+    monkeypatch.setattr("x_ops.scheduler.random.randint", lambda _low, _high: 300)
+    backend = IntervalBackend()
+    scheduler = TaskScheduler(backend)
+    now = datetime(2026, 8, 20, 9, 30, tzinfo=UTC)
+
+    assert await scheduler.poll_once(now) == []
+    assert backend.calls == []
+    updated_schedule = backend.updated[0][1]["schedule"]
+    assert updated_schedule["next_run_at"] == "2026-08-20T10:55:00+00:00"
+
+
+async def test_interval_with_jitter_fires_from_next_run_and_schedules_next(monkeypatch):
+    class IntervalBackend(ScheduledBackend):
+        async def list_tasks(self, _filters):
+            return [
+                {
+                    "id": "task-1",
+                    "enabled": True,
+                    "schedule": {
+                        "type": "interval",
+                        "interval_seconds": 4800,
+                        "jitter_seconds": 600,
+                        "next_run_at": "2026-08-20T10:50:00+00:00",
+                        "enabled": True,
+                    },
+                }
+            ]
+
+    monkeypatch.setattr("x_ops.scheduler.random.randint", lambda _low, _high: -120)
+    backend = IntervalBackend()
+    scheduler = TaskScheduler(backend)
+    now = datetime(2026, 8, 20, 10, 50, tzinfo=UTC)
+
+    assert await scheduler.poll_once(now) == ["task-1"]
+    assert backend.calls == [("task-1", "schedule", "interval:2026-08-20T10:50:00+00:00")]
+    updated_schedule = backend.updated[0][1]["schedule"]
+    assert updated_schedule["last_fire_key"] == "interval:2026-08-20T10:50:00+00:00"
+    assert updated_schedule["next_run_at"] == "2026-08-20T12:08:00+00:00"

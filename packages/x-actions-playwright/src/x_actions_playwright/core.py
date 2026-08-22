@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
+import hmac
 import re
+import struct
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -82,6 +87,23 @@ def hash_text(value: str = "") -> str:
 def summarize_text(value: str = "", maximum: int = 120) -> str:
     text = " ".join(str(value).split())
     return text if len(text) <= maximum else f"{text[: maximum - 1]}…"
+
+
+def totp_now(secret: str, *, digits: int = 6, period: int = 30, timestamp: int | None = None) -> str:
+    """Generate a TOTP code from a Base32 secret without adding a runtime dependency."""
+    normalized = re.sub(r"\s+", "", secret).upper()
+    if not normalized:
+        raise ActionError("CONTENT_MISMATCH", "totpSecret is required when a 2FA code must be generated.")
+    padded = normalized + "=" * ((8 - len(normalized) % 8) % 8)
+    try:
+        key = base64.b32decode(padded, casefold=True)
+    except (binascii.Error, ValueError) as error:
+        raise ActionError("CONTENT_MISMATCH", "totpSecret must be a valid Base32 secret.") from error
+    counter = int((timestamp if timestamp is not None else time.time()) // period)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+    return str(code % (10**digits)).zfill(digits)
 
 
 def parse_compact_number(value: str = "") -> dict[str, Any]:

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -63,6 +64,7 @@ class TaskScheduler:
                 schedule = task.get("schedule")
                 if not isinstance(schedule, Mapping) or not schedule.get("enabled", True):
                     continue
+                schedule = await self._ensure_interval_next_run(task, schedule, now)
                 fire_key = _fire_key(schedule, now)
                 task_id = str(task.get("id") or "")
                 if (
@@ -84,6 +86,10 @@ class TaskScheduler:
                 updated_schedule = dict(schedule)
                 updated_schedule["last_fire_key"] = fire_key
                 updated_schedule["last_run_at"] = now.isoformat()
+                if _uses_interval_jitter(updated_schedule):
+                    next_run_at = _next_jittered_interval_at(updated_schedule, now)
+                    if next_run_at is not None:
+                        updated_schedule["next_run_at"] = next_run_at.isoformat()
                 if str(schedule.get("type") or "once") == "once":
                     updated_schedule["enabled"] = False
                 await self.backend.update_task(task_id, {"schedule": updated_schedule})
@@ -96,6 +102,27 @@ class TaskScheduler:
                     extra={"task_id": str(task.get("id") or "")},
                 )
         return triggered
+
+    async def _ensure_interval_next_run(
+        self,
+        task: Mapping[str, Any],
+        schedule: Mapping[str, Any],
+        now: datetime,
+    ) -> Mapping[str, Any]:
+        if str(schedule.get("type") or "once") != "interval" or not _uses_interval_jitter(schedule):
+            return schedule
+        if _parse_datetime(schedule.get("next_run_at")) is not None:
+            return schedule
+        updated_schedule = dict(schedule)
+        anchor = _parse_datetime(schedule.get("last_run_at")) or _parse_datetime(schedule.get("start_at")) or now
+        next_run_at = _next_jittered_interval_at(updated_schedule, anchor)
+        if next_run_at is None:
+            return schedule
+        updated_schedule["next_run_at"] = next_run_at.isoformat()
+        task_id = str(task.get("id") or "")
+        if task_id:
+            await self.backend.update_task(task_id, {"schedule": updated_schedule})
+        return updated_schedule
 
 
 def _fire_key(schedule: Mapping[str, Any], now: datetime) -> str | None:
@@ -110,6 +137,11 @@ def _fire_key(schedule: Mapping[str, Any], now: datetime) -> str | None:
             seconds = int(schedule.get("interval_seconds") or 0)
         except (TypeError, ValueError):
             return None
+        next_run_at = _parse_datetime(schedule.get("next_run_at"))
+        if next_run_at is not None:
+            if seconds < 1 or now < next_run_at:
+                return None
+            return f"interval:{next_run_at.isoformat()}"
         anchor = _parse_datetime(schedule.get("start_at")) or datetime(1970, 1, 1, tzinfo=UTC)
         if seconds < 1 or now < anchor:
             return None
@@ -124,6 +156,39 @@ def _fire_key(schedule: Mapping[str, Any], now: datetime) -> str | None:
         if _cron_matches(expression, local_now):
             return f"cron:{now.strftime('%Y-%m-%dT%H:%M')}"
     return None
+
+
+def _uses_interval_jitter(schedule: Mapping[str, Any]) -> bool:
+    return _interval_jitter_seconds(schedule) > 0
+
+
+def _interval_jitter_seconds(schedule: Mapping[str, Any]) -> int:
+    try:
+        seconds = int(schedule.get("jitter_seconds") or schedule.get("interval_jitter_seconds") or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds > 0:
+        return seconds
+    try:
+        interval = int(schedule.get("interval_seconds") or 0)
+        ratio = float(schedule.get("interval_jitter_ratio") or 0)
+    except (TypeError, ValueError):
+        return 0
+    if interval < 1 or ratio <= 0:
+        return 0
+    return max(1, int(interval * min(ratio, 1.0)))
+
+
+def _next_jittered_interval_at(schedule: Mapping[str, Any], anchor: datetime) -> datetime | None:
+    try:
+        interval = int(schedule.get("interval_seconds") or 0)
+    except (TypeError, ValueError):
+        return None
+    if interval < 1:
+        return None
+    jitter = min(interval - 1, _interval_jitter_seconds(schedule))
+    offset = random.randint(-jitter, jitter) if jitter > 0 else 0
+    return anchor.astimezone(UTC) + timedelta(seconds=interval + offset)
 
 
 def _parse_datetime(value: Any) -> datetime | None:

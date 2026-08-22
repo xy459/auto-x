@@ -29,6 +29,11 @@ class Params(BaseModel):
     target_authors: set[str] = Field(default_factory=set)
     keywords: set[str] = Field(default_factory=set)
     max_likes: int = Field(default=10, ge=1, le=100)
+    timeline_ready_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    collect_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    collect_retry_count: int = Field(default=2, ge=0, le=5)
+    stalled_scroll_retry_count: int = Field(default=3, ge=0, le=10)
+    interaction_timeout_seconds: float = Field(default=30, ge=10, le=120)
 
 
 # 完整执行流程：
@@ -67,7 +72,9 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                 await context.actions.interaction.like(
                     {"tweetId": tweet_id},
                     options=write_options(
-                        context, f"like:{context.account.account_id}:{tweet_id}"
+                        context,
+                        f"like:{context.account.account_id}:{tweet_id}",
+                        timeout_ms=int(params.interaction_timeout_seconds * 1_000),
                     ),
                 ),
                 task_run_id=context.cancellation.task_run_id,
@@ -87,10 +94,16 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
         interval_seconds=params.scroll_interval_seconds,
         distance=params.scroll_distance,
         handle_batch=handle_batch,
+        timeline_ready_timeout_seconds=params.timeline_ready_timeout_seconds,
+        collect_timeout_seconds=params.collect_timeout_seconds,
+        collect_retry_count=params.collect_retry_count,
+        stalled_scroll_retry_count=params.stalled_scroll_retry_count,
     )
     return {
         "posts_seen": summary["postsSeen"],
         "matched": matched,
         "liked": liked,
         "skipped": skipped,
+        "scrolls_completed": summary["scrolls"],
+        "stop_reason": summary["stopReason"],
     }

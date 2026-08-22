@@ -17,6 +17,7 @@ from x_ops.task_sdk import DisabledAIService, TaskCancelledError, TaskLoggerFact
 
 class Params(BaseModel):
     value: int = 1
+    max_concurrent_runs: int | None = None
 
 
 class ActionsFactory:
@@ -47,11 +48,18 @@ def make_runner(
     locks=None,
     slots=None,
     browser_timeout=120.0,
+    preserve_browser_on_uncertain=False,
 ):
     registry = TaskProgramRegistry()
     registry.register(
         TaskProgram(
-            ProgramSpec("test_program", "1.2.3", "Test", "test program"),
+            ProgramSpec(
+                "test_program",
+                "1.2.3",
+                "Test",
+                "test program",
+                preserve_browser_on_uncertain=preserve_browser_on_uncertain,
+            ),
             Params,
             program_run,
         )
@@ -124,6 +132,31 @@ async def test_top_level_outcome_mapping_always_releases(store, exception, statu
     assert result.status is status
     assert result.error["code"] == code
     assert browser.active_leases == 0
+
+
+async def test_uncertain_program_can_preserve_browser_for_operator_review(store):
+    browser = InMemoryBrowserGateway()
+
+    async def program(_context, _params):
+        raise TaskUncertainError(action_id="account.login")
+
+    await create_run(
+        store,
+        "uncertain-login",
+        browser_end_policy=BrowserEndPolicy.CLOSE,
+    )
+    runner = make_runner(
+        store,
+        program,
+        browser=browser,
+        preserve_browser_on_uncertain=True,
+    )
+    await runner.execute("uncertain-login")
+
+    result = await store.get_run("uncertain-login")
+    assert result.status is RunStatus.UNCERTAIN
+    assert browser.active_leases == 0
+    assert "browser-1" in browser.running_accounts
 
 
 async def test_error_persistence_redacts_credentials_and_sensitive_details(store):
@@ -257,6 +290,52 @@ async def test_different_accounts_run_in_parallel_but_slots_limit_capacity(store
     assert slots.max_active == 2
     release.set()
     await asyncio.gather(*tasks)
+
+
+async def test_trigger_scoped_limit_applies_before_browser_acquire(store):
+    release = asyncio.Event()
+    first_started = asyncio.Event()
+    active = 0
+    maximum = 0
+
+    async def program(_context, _params):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        first_started.set()
+        await release.wait()
+        active -= 1
+        return {}
+
+    common = {
+        "params": {"value": 2, "max_concurrent_runs": 1},
+        "trigger_id": "login-job:batch-1",
+        "browser_end_policy": BrowserEndPolicy.CLOSE,
+    }
+    await create_run(store, "one", "a-1", **common)
+    await create_run(store, "two", "a-2", **common)
+    accounts = [
+        AccountRecord("a-1", "A1", "b-1"),
+        AccountRecord("a-2", "A2", "b-2"),
+    ]
+    browser = InMemoryBrowserGateway()
+    runner = make_runner(
+        store,
+        program,
+        accounts=accounts,
+        browser=browser,
+        slots=ExecutionSlotManager(2),
+    )
+    tasks = [asyncio.create_task(runner.execute(run_id)) for run_id in ("one", "two")]
+
+    await asyncio.wait_for(first_started.wait(), 1)
+    await asyncio.sleep(0.05)
+    assert maximum == 1
+    assert browser.max_active_leases == 1
+
+    release.set()
+    await asyncio.gather(*tasks)
+    assert browser.running_accounts == set()
 
 
 async def test_execution_slot_limit_can_be_updated_without_restart():
@@ -453,6 +532,31 @@ async def test_cleanup_warning_does_not_overwrite_success(store):
     result = await store.get_run("cleanup")
     assert result.status is RunStatus.SUCCEEDED
     assert result.cleanup_warnings[0]["code"] == "BROWSER_CLOSE_FAILED"
+
+
+async def test_keep_open_cleanup_preserves_task_page(store):
+    calls = []
+
+    class Lease:
+        page = object()
+        browser_was_started = True
+
+        async def release(self, *, close_browser, close_page=True):
+            calls.append((close_browser, close_page))
+            return CleanupReport()
+
+    class Browser:
+        async def acquire(self, **_kwargs):
+            return Lease()
+
+    async def program(_context, _params):
+        return {"done": True}
+
+    await create_run(store, "keep-open")
+    runner = make_runner(store, program, browser=Browser())
+    await runner.execute("keep-open")
+
+    assert calls == [(False, False)]
 
 
 async def test_duplicate_message_does_not_execute_twice(store):

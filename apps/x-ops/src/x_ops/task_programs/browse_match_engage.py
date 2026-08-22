@@ -1,6 +1,7 @@
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
+from x_actions_playwright.errors import ActionError
 
 from ..task_sdk import TaskContext
 from ._common import (
@@ -34,12 +35,20 @@ class Params(BaseModel):
     fixed_reply: str | None = Field(default=None, max_length=280)
     ai_template: str = "reply_to_post"
     max_engagements: int = Field(default=10, ge=1, le=100)
+    follow_authors: bool = False
+    max_follows: int = Field(default=10, ge=1, le=100)
+    timeline_ready_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    collect_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    collect_retry_count: int = Field(default=2, ge=0, le=5)
+    stalled_scroll_retry_count: int = Field(default=3, ge=0, le=10)
+    interaction_timeout_seconds: float = Field(default=30, ge=10, le=120)
+    follow_timeout_seconds: float = Field(default=30, ge=10, le=120)
 
     @model_validator(mode="after")
     def fixed_mode_has_text(self) -> Self:
         if self.reply_mode == "fixed" and not (self.fixed_reply or "").strip():
             raise ValueError("fixed_reply is required when reply_mode=fixed")
-        if not self.like and self.reply_mode == "none":
+        if not self.like and self.reply_mode == "none" and not self.follow_authors:
             raise ValueError("at least one engagement must be enabled")
         return self
 
@@ -47,13 +56,19 @@ class Params(BaseModel):
 async def run(context: TaskContext, params: Params) -> dict[str, Any]:
     await context.cancellation.raise_if_cancelled()
     context.logger.info("开始浏览匹配互动", feed=params.feed)
-    matched = liked = replied = actions_completed = 0
+    matched = liked = replied = actions_completed = followed = follow_skipped = 0
+    handled_authors: set[str] = set()
 
     async def handle_batch(posts: list[dict[str, Any]]) -> bool:
-        nonlocal matched, liked, replied, actions_completed
+        nonlocal matched, liked, replied, actions_completed, followed, follow_skipped
         for post in posts:
             await context.cancellation.raise_if_cancelled()
-            if actions_completed >= params.max_engagements:
+            engagement_limit_reached = (
+                (not params.like and params.reply_mode == "none")
+                or actions_completed >= params.max_engagements
+            )
+            follow_limit_reached = not params.follow_authors or followed >= params.max_follows
+            if engagement_limit_reached and follow_limit_reached:
                 return True
             if not matches_post(post, params.target_authors, params.keywords):
                 continue
@@ -62,6 +77,54 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                 continue
             matched += 1
             context.logger.info("匹配到目标帖子", post_id=tweet_id)
+            author = post.get("author") or {}
+            username = str(author.get("username") if isinstance(author, dict) else author).lstrip("@").strip()
+            normalized_author = username.casefold()
+            own_username = str(getattr(context.account, "username", None) or "").lstrip("@").casefold()
+            if (
+                params.follow_authors
+                and followed < params.max_follows
+                and normalized_author
+                and normalized_author not in handled_authors
+            ):
+                handled_authors.add(normalized_author)
+                if normalized_author == own_username:
+                    follow_skipped += 1
+                    context.logger.info("跳过关注当前登录账号", author=username)
+                else:
+                    context.logger.info("准备关注匹配帖子作者", author=username)
+                    try:
+                        follow_result = require_certain(
+                            await context.actions.account.followHandle(
+                                {"handle": username},
+                                options=write_options(
+                                    context,
+                                    f"follow:{context.account.account_id}:{normalized_author}",
+                                    timeout_ms=int(params.follow_timeout_seconds * 1_000),
+                                ),
+                            ),
+                            task_run_id=context.cancellation.task_run_id,
+                        )
+                    except ActionError as error:
+                        if error.code not in {
+                            "TARGET_UNSAFE",
+                            "ACCOUNT_NOT_FOUND",
+                            "ACCOUNT_SUSPENDED",
+                            "ACCOUNT_TEMPORARILY_RESTRICTED",
+                        }:
+                            raise
+                        follow_skipped += 1
+                        context.logger.warning(
+                            "跳过无法关注的作者",
+                            author=username,
+                            error_code=error.code,
+                            error_message=error.message,
+                        )
+                    else:
+                        if result_status(follow_result) == "success":
+                            followed += 1
+                        else:
+                            follow_skipped += 1
             if params.like and actions_completed < params.max_engagements:
                 result = require_certain(
                     await context.actions.interaction.like(
@@ -69,6 +132,7 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                         options=write_options(
                             context,
                             f"engage-like:{context.account.account_id}:{tweet_id}",
+                            timeout_ms=int(params.interaction_timeout_seconds * 1_000),
                         ),
                     ),
                     task_run_id=context.cancellation.task_run_id,
@@ -91,6 +155,7 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
                         options=write_options(
                             context,
                             f"engage-reply:{context.account.account_id}:{tweet_id}",
+                            timeout_ms=int(params.interaction_timeout_seconds * 1_000),
                         ),
                     ),
                     task_run_id=context.cancellation.task_run_id,
@@ -107,6 +172,10 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
         interval_seconds=params.scroll_interval_seconds,
         distance=params.scroll_distance,
         handle_batch=handle_batch,
+        timeline_ready_timeout_seconds=params.timeline_ready_timeout_seconds,
+        collect_timeout_seconds=params.collect_timeout_seconds,
+        collect_retry_count=params.collect_retry_count,
+        stalled_scroll_retry_count=params.stalled_scroll_retry_count,
     )
     return {
         "posts_seen": summary["postsSeen"],
@@ -114,4 +183,8 @@ async def run(context: TaskContext, params: Params) -> dict[str, Any]:
         "liked": liked,
         "replied": replied,
         "actions_completed": actions_completed,
+        "followed": followed,
+        "follow_skipped": follow_skipped,
+        "scrolls_completed": summary["scrolls"],
+        "stop_reason": summary["stopReason"],
     }

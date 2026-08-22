@@ -20,6 +20,8 @@ class FakeSession:
         self.closed = False
         self.context = object()
         self.pages = []
+        self.task_page = None
+        self.task_page_in_use = False
 
     async def start(self):
         type(self).starts += 1
@@ -41,6 +43,26 @@ class FakeSession:
         page = FakePage()
         self.pages.append(page)
         return page
+
+    async def acquire_task_page(self):
+        if self.task_page is not None and self.task_page.closed:
+            self.task_page = None
+            self.task_page_in_use = False
+        if self.task_page is not None and not self.task_page_in_use:
+            self.task_page_in_use = True
+            return self.task_page, True
+        if self.task_page is None:
+            self.task_page = await self.new_page()
+            self.task_page_in_use = True
+            return self.task_page, True
+        return await self.new_page(), False
+
+    def release_task_page(self, page, *, preserve):
+        if page is not self.task_page:
+            return
+        self.task_page_in_use = False
+        if not preserve or page.closed:
+            self.task_page = None
 
     async def bring_to_front(self):
         type(self).activations += 1
@@ -166,6 +188,44 @@ async def test_acquire_page_tracks_popups_but_not_unrelated_pages(tmp_path: Path
     assert unrelated.closed is False
     assert existing.is_alive() is True
     assert result["pageErrors"] == []
+
+
+@pytest.mark.asyncio
+async def test_keep_open_preserves_and_reuses_primary_task_page(tmp_path: Path):
+    account = Account(acc="a", userDataDir=str(tmp_path / "a"))
+    config = AccountsConfig(accounts=[account])
+    registry = SessionRegistry(FakeSession)
+
+    first = await registry.acquire_page(account, config)
+    first_page = first.page
+    popup = FakePage()
+    first.page.emit_popup(popup)
+    result = await first.release(close_page=False)
+
+    assert result["pageErrors"] == []
+    assert first_page.closed is False
+    assert popup.closed is True
+
+    second = await registry.acquire_page(account, config)
+    assert second.page is first_page
+    await second.release()
+    assert first_page.closed is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_acquire_uses_ephemeral_page_and_does_not_leak_it(tmp_path: Path):
+    account = Account(acc="a", userDataDir=str(tmp_path / "a"))
+    config = AccountsConfig(accounts=[account])
+    registry = SessionRegistry(FakeSession)
+
+    first = await registry.acquire_page(account, config)
+    second = await registry.acquire_page(account, config)
+
+    assert second.page is not first.page
+    await second.release(close_page=False)
+    assert second.page.closed is True
+    await first.release(close_page=False)
+    assert first.page.closed is False
 
 
 @pytest.mark.asyncio

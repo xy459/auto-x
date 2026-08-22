@@ -46,6 +46,7 @@ class TaskProgramRegistry:
                 "version": program.SPEC.version,
                 "title": program.SPEC.title,
                 "description": program.SPEC.description,
+                "supports_batch_schedule": program.SPEC.supports_batch_schedule,
                 "params_schema": program.Params.model_json_schema(),
             }
             for program in self.list()
@@ -53,9 +54,25 @@ class TaskProgramRegistry:
 
     @classmethod
     def default(cls) -> TaskProgramRegistry:
-        from . import browse_match_engage, browse_only, like_posts, reply_posts
+        from . import (
+            browse_match_engage,
+            browse_only,
+            browse_view_posts,
+            like_posts,
+            login_accounts,
+            reply_posts,
+            search_authors_engage,
+        )
 
         registry = cls()
-        for module in (browse_only, like_posts, reply_posts, browse_match_engage):
+        for module in (
+            browse_only,
+            like_posts,
+            reply_posts,
+            browse_match_engage,
+            search_authors_engage,
+            login_accounts,
+            browse_view_posts,
+        ):
             registry.register(TaskProgram(module.SPEC, module.Params, module.run))
         return registry

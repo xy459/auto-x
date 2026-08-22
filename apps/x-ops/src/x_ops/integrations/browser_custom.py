@@ -15,7 +15,7 @@ class BrowserLease(Protocol):
     @property
     def browser_was_started(self) -> bool: ...
 
-    async def release(self, *, close_browser: bool) -> CleanupReport: ...
+    async def release(self, *, close_browser: bool, close_page: bool = True) -> CleanupReport: ...
 
 
 class BrowserGateway(Protocol):
@@ -39,19 +39,20 @@ class _MemoryLease:
     browser_account_id: str
     released: bool = False
 
-    async def release(self, *, close_browser: bool) -> CleanupReport:
+    async def release(self, *, close_browser: bool, close_page: bool = True) -> CleanupReport:
         if self.released:
             return CleanupReport()
         self.released = True
         warnings: list[dict[str, Any]] = []
-        try:
-            close = getattr(self.page, "close", None)
-            if close:
-                result = close()
-                if hasattr(result, "__await__"):
-                    await result
-        except Exception as exc:
-            warnings.append({"code": "TASK_PAGE_CLOSE_FAILED", "message": str(exc)})
+        if close_page or close_browser:
+            try:
+                close = getattr(self.page, "close", None)
+                if close:
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        await result
+            except Exception as exc:
+                warnings.append({"code": "TASK_PAGE_CLOSE_FAILED", "message": str(exc)})
         if close_browser:
             self.gateway.running_accounts.discard(self.browser_account_id)
         self.gateway.active_leases -= 1
@@ -95,8 +96,13 @@ class _BrowserCustomLeaseAdapter:
     def browser_was_started(self) -> bool:
         return bool(self._lease.browser_was_started)
 
-    async def release(self, *, close_browser: bool) -> CleanupReport:
-        result = await self._lease.release(close_browser=close_browser)
+    async def release(self, *, close_browser: bool, close_page: bool = True) -> CleanupReport:
+        try:
+            result = await self._lease.release(close_browser=close_browser, close_page=close_page)
+        except TypeError as exc:
+            if "close_page" not in str(exc):
+                raise
+            result = await self._lease.release(close_browser=close_browser)
         warnings: list[dict[str, Any]] = [
             {"code": "TASK_PAGE_CLOSE_FAILED", "message": str(message)}
             for message in result.get("pageErrors", [])

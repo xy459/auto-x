@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from x_actions_playwright import ActionError, ExecutionOptions, MemoryIdempotencyStore, XActions
-from x_actions_playwright.core import cancellable_sleep
+from x_actions_playwright.core import cancellable_sleep, totp_now
 
 
 class StubAdapter:
@@ -85,6 +85,26 @@ async def test_namespaced_and_generic_execution_return_same_contract():
     namespaced = await actions.context.inspect(object())
     assert direct.status == namespaced.status == "success"
     assert direct.action == namespaced.action == "context.inspect"
+
+
+def test_totp_generation_uses_standard_rfc_vector():
+    assert totp_now("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", timestamp=59, digits=8) == "94287082"
+
+
+def test_account_login_is_exposed_in_catalog_namespace():
+    actions = XActions(adapter=StubAdapter())
+    definition = actions.get_action_definition("account.login")
+    assert definition is not None
+    assert definition.access == "write"
+    assert callable(actions.account.login)
+
+
+def test_author_follow_and_profile_post_actions_are_exposed():
+    actions = XActions(adapter=StubAdapter())
+    assert actions.get_action_definition("account.followHandle") is not None
+    assert callable(actions.account.followHandle)
+    assert callable(actions.account.listPosts)
+    assert callable(actions.account.scrollPosts)
 
 
 @pytest.mark.asyncio

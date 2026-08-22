@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import re
+import sys
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import quote, urlparse
@@ -21,6 +24,7 @@ from .core import (
     parse_schedule,
     parse_tweet_identity,
     relationship_state,
+    totp_now,
 )
 from .errors import ActionError, normalize_error
 from .models import ExecutionOptions
@@ -164,7 +168,18 @@ class XAdapter:
                 # call may have triggered the external write.
                 await target.click(timeout=options.timeout_ms, trial=True)
                 options.trace.mark_mutation_triggered()
-            await target.click(timeout=options.timeout_ms)
+                # X frequently replaces write controls between consecutive
+                # actionability checks. Re-running the full default click can
+                # then wait for the stale transition until the action-wide
+                # timeout. The trial above already proved the control is safe
+                # to receive input, so dispatch the live click without another
+                # long stability wait and leave time for postcondition checks.
+                await target.click(
+                    timeout=min(options.timeout_ms, 5_000),
+                    force=True,
+                )
+            else:
+                await target.click(timeout=options.timeout_ms)
         except ActionError:
             raise
         except Exception as error:
@@ -295,6 +310,67 @@ class XAdapter:
 
     async def timeline_collect(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         return await self._browse_timeline(page, payload, options, collect=True)
+
+    def _show_new_posts_locator(self, page: Page) -> Locator:
+        pattern = re.compile(r"^(Show|显示|查看).*(post|posts|帖子|条)", re.I)
+        return page.get_by_role("button", name=pattern).or_(page.get_by_text(pattern)).first
+
+    async def _click_show_new_posts_if_visible(self, page: Page, options: ExecutionOptions) -> bool:
+        show = self._show_new_posts_locator(page)
+        if not await show.count() or not await show.is_visible():
+            return False
+        await self._click(show, "Show new posts", options)
+        return True
+
+    async def timeline_refresh_new(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
+        feed = self._feed(payload)
+        strategy = str(payload.get("strategy") or "tab_first").strip().lower().replace("-", "_")
+        if strategy not in {"tab_first", "home_show", "none"}:
+            raise ActionError("CONTENT_MISMATCH", "strategy must be tab_first, home_show, or none.")
+        if classify_page(page.url) != "home":
+            await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=options.timeout_ms)
+            return {"status": "navigating", "url": "https://x.com/home", "requiresRetry": True, "strategy": strategy}
+        settle_ms = int(clamp_number(payload.get("settleMs"), 2500, 500, 30000))
+        evidence: list[str] = []
+        clicked_show = False
+        used_home = False
+        clicked_tab = False
+
+        if strategy == "none":
+            return {"status": "skipped", "reason": "refresh-disabled", "strategy": strategy}
+
+        if await self._click_show_new_posts_if_visible(page, options):
+            clicked_show = True
+            evidence.append("show-new-posts-visible-clicked")
+        elif strategy == "tab_first":
+            tab = self._timeline_tab(page, feed)
+            await self._click(tab, f"{feed} Home tab refresh", options)
+            clicked_tab = True
+            evidence.append("timeline-tab-clicked")
+            await cancellable_sleep(settle_ms, options.cancellation)
+            if await self._click_show_new_posts_if_visible(page, options):
+                clicked_show = True
+                evidence.append("show-new-posts-after-tab-clicked")
+
+        if not clicked_show and (strategy == "home_show" or payload.get("homeFallback")):
+            before = int(await page.evaluate("window.scrollY"))
+            await page.keyboard.press("Home")
+            used_home = True
+            evidence.append(f"home-key:{before}->top")
+            await cancellable_sleep(settle_ms, options.cancellation)
+            if await self._click_show_new_posts_if_visible(page, options):
+                clicked_show = True
+                evidence.append("show-new-posts-after-home-clicked")
+
+        return {
+            "status": "success" if clicked_show or clicked_tab or used_home else "skipped",
+            "strategy": strategy,
+            "feed": feed,
+            "clickedShowNewPosts": clicked_show,
+            "clickedTimelineTab": clicked_tab,
+            "usedHomeKey": used_home,
+            "evidence": evidence or ["no-visible-new-posts-control"],
+        }
 
     async def _browse_timeline(self, page: Page, payload: dict[str, Any], options: ExecutionOptions, *, collect: bool) -> dict[str, Any]:
         feed = self._feed(payload)
@@ -647,19 +723,35 @@ class XAdapter:
         if options.dry_run:
             return {"status": "success", "dryRun": True, "wouldExecute": action, "target": post}
         control = await self._owned_control(article, click_test_ids)
-        await self._click(
-            control,
-            f"{action} button",
-            options,
-            mutation=menu_confirm is None,
-        )
-        if menu_confirm is not None:
-            await self._click(menu_confirm, f"{action} confirmation", options, mutation=True)
+        click_error: ActionError | None = None
+        try:
+            await self._click(
+                control,
+                f"{action} button",
+                options,
+                mutation=menu_confirm is None,
+            )
+            if menu_confirm is not None:
+                await self._click(menu_confirm, f"{action} confirmation", options, mutation=True)
+        except ActionError as error:
+            if not options.trace.mutation_triggered:
+                raise
+            click_error = error
         try:
             await (await self._owned_control(article, (desired_test_id,))).wait_for(state="visible", timeout=min(options.timeout_ms, 7000))
-            return {"status": "success", "target": await self._post(article, include_ads=True), "evidence": [f"state:{current_test_id}->{desired_test_id}"]}
+            evidence = [f"state:{current_test_id}->{desired_test_id}"]
+            if click_error is not None:
+                evidence.append(f"click-error-recovered:{click_error.code}")
+            return {"status": "success", "target": await self._post(article, include_ads=True), "evidence": evidence}
         except Exception:
-            return {"status": "uncertain", "target": post, "reason": f"{action} was clicked but the final target state was not observed. Do not retry automatically."}
+            result: dict[str, Any] = {
+                "status": "uncertain",
+                "target": post,
+                "reason": f"{action} was clicked but the final target state was not observed. Do not retry automatically.",
+            }
+            if click_error is not None:
+                result["clickError"] = click_error.to_dict()
+            return result
 
     async def comment_like(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         article = await self._comment_article(page, payload.get("commentId"), options)
@@ -670,32 +762,103 @@ class XAdapter:
         return await self._state_action(page, article, options, action="comment.unlike", current_test_id="unlike", desired_test_id="like", click_test_ids=("unlike",))
 
     async def _open_fresh_composer(self, page: Page, trigger: Locator, options: ExecutionOptions, *, kind: str) -> Locator:
-        editors = page.locator('[data-testid="tweetTextarea_0"][contenteditable="true"]')
-        before = await editors.count()
-        await self._click(trigger, f"{kind} trigger", options)
+        selector = '[data-testid="tweetTextarea_0"][contenteditable="true"]'
+        snapshot_key = f"{id(self)}:{time.monotonic_ns()}"
+        await page.evaluate(
+            """
+            ({ selector, key }) => {
+              const snapshots = globalThis.__autoXComposerSnapshots
+                ?? (globalThis.__autoXComposerSnapshots = new Map());
+              const state = new WeakMap();
+              for (const editor of document.querySelectorAll(selector)) {
+                const style = getComputedStyle(editor);
+                state.set(editor, {
+                  visible: style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && editor.getClientRects().length > 0,
+                  inDialog: Boolean(editor.closest('[role="dialog"], [aria-modal="true"]')),
+                });
+              }
+              snapshots.set(key, state);
+            }
+            """,
+            {"selector": selector, "key": snapshot_key},
+        )
         try:
-            await page.wait_for_function("([before]) => document.querySelectorAll('[data-testid=\"tweetTextarea_0\"][contenteditable=\"true\"]').length > before", arg=[before], timeout=options.timeout_ms)
+            await self._click(trigger, f"{kind} trigger", options)
+            deadline = asyncio.get_running_loop().time() + options.timeout_ms / 1000
+            while asyncio.get_running_loop().time() < deadline:
+                modal_editors = page.locator(
+                    f'[role="dialog"] {selector}, [aria-modal="true"] {selector}'
+                )
+                all_editors = page.locator(selector)
+                for candidates in (modal_editors, all_editors):
+                    for index in range(await candidates.count() - 1, -1, -1):
+                        editor = candidates.nth(index)
+                        if not await editor.is_visible():
+                            continue
+                        is_fresh = await editor.evaluate(
+                            """
+                            (element, key) => {
+                              const previous = globalThis.__autoXComposerSnapshots
+                                ?.get(key)?.get(element);
+                              const nowInDialog = Boolean(
+                                element.closest('[role="dialog"], [aria-modal="true"]')
+                              );
+                              return !previous?.visible
+                                || (nowInDialog && !previous?.inDialog);
+                            }
+                            """,
+                            snapshot_key,
+                        )
+                        if is_fresh:
+                            return editor
+                await cancellable_sleep(100, options.cancellation)
+        except ActionError:
+            raise
         except Exception as error:
-            raise ActionError("TARGET_NOT_FOUND", f"A fresh {kind} composer did not open.") from error
-        return editors.last
+            raise ActionError(
+                "TARGET_NOT_FOUND", f"A visible {kind} composer did not open."
+            ) from error
+        finally:
+            try:
+                await page.evaluate(
+                    "key => globalThis.__autoXComposerSnapshots?.delete(key)",
+                    snapshot_key,
+                )
+            except Exception:
+                pass
+        raise ActionError("TARGET_NOT_FOUND", f"A visible {kind} composer did not open.")
 
     async def _prepare_composer(self, page: Page, editor: Locator, text: str, options: ExecutionOptions) -> tuple[Locator, Locator]:
         if not text.strip():
             raise ActionError("CONTENT_MISMATCH", "Composer text is empty.")
+        try:
+            await editor.wait_for(state="visible", timeout=options.timeout_ms)
+        except Exception as error:
+            raise ActionError(
+                "ELEMENT_NOT_VISIBLE", "The selected composer editor is not visible."
+            ) from error
         existing = (await editor.inner_text()).strip()
         if existing:
             raise ActionError("DRAFT_CONFLICT", "Refusing to overwrite an existing draft.", {"existingHash": hash_text(existing), "existingLength": len(existing)})
         await editor.click(timeout=options.timeout_ms)
         await editor.press_sequentially(text, delay=0, timeout=options.timeout_ms)
         actual = (await editor.inner_text()).replace("\r\n", "\n").strip()
-        if actual != text.replace("\r\n", "\n").strip():
+        expected = text.replace("\r\n", "\n").strip()
+        if not actual and expected:
+            await editor.fill(text, timeout=options.timeout_ms)
+            actual = (await editor.inner_text()).replace("\r\n", "\n").strip()
+        if actual != expected:
             raise ActionError("CONTENT_MISMATCH", "Editor content does not match requested text.", {"expectedHash": hash_text(text), "actualHash": hash_text(actual)})
         surface = editor.locator("xpath=ancestor::*[@role='dialog' or @aria-modal='true'][1]")
         if not await surface.count():
             surface = editor.locator("xpath=ancestor::*[.//*[@data-testid='tweetButton' or @data-testid='tweetButtonInline']][1]")
         if not await surface.count():
             raise ActionError("STATE_UNKNOWN", "Could not bind the composer to its local surface.")
-        button = surface.locator('[data-testid="tweetButton"], [data-testid="tweetButtonInline"]')
+        button = surface.locator(
+            '[data-testid="tweetButton"]:visible, [data-testid="tweetButtonInline"]:visible'
+        )
         try:
             await button.first.wait_for(state="visible", timeout=options.timeout_ms)
             if not await button.first.is_enabled():
@@ -877,6 +1040,337 @@ class XAdapter:
         await page.goto(url, wait_until="domcontentloaded", timeout=options.timeout_ms)
         return {"status": "navigating", "requiresRetry": True, "mode": mode, "url": url}
 
+    async def _visible_locator(self, locators: list[Locator]) -> Locator | None:
+        for locator in locators:
+            if await locator.count() and await locator.first.is_visible():
+                return locator.first
+        return None
+
+    async def _wait_for_visible_locator(
+        self,
+        locators: list[Locator],
+        options: ExecutionOptions,
+        *,
+        timeout_ms: int = 12_000,
+    ) -> Locator | None:
+        deadline = asyncio.get_running_loop().time() + min(timeout_ms, options.timeout_ms) / 1000
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                locator = await self._visible_locator(locators)
+            except Exception:  # X may replace the login dialog during navigation.
+                locator = None
+            if locator is not None:
+                return locator
+            await cancellable_sleep(250, options.cancellation)
+        return None
+
+    async def _type_like_user(
+        self,
+        locator: Locator,
+        value: str,
+        options: ExecutionOptions,
+        *,
+        delay_ms: int,
+    ) -> None:
+        await locator.scroll_into_view_if_needed(timeout=options.timeout_ms)
+        await locator.click(timeout=options.timeout_ms)
+        modifier = "Meta" if sys.platform == "darwin" else "Control"
+        await locator.press(f"{modifier}+A", timeout=options.timeout_ms)
+        await locator.type(value, delay=max(20, min(delay_ms, 500)), timeout=options.timeout_ms)
+
+    async def _click_button_by_name(self, page: Page, names: list[str], options: ExecutionOptions) -> bool:
+        for name in names:
+            locator = page.get_by_role("button", name=re.compile(f"^{re.escape(name)}$", re.I)).first
+            if await locator.count() and await locator.is_visible() and await locator.is_enabled():
+                await self._click(locator, name, options)
+                return True
+        return False
+
+    async def _fill_two_factor_code(
+        self,
+        page: Page,
+        input_locator: Locator,
+        code: str,
+        options: ExecutionOptions,
+        *,
+        typing_delay_ms: int,
+    ) -> None:
+        numeric_inputs = page.locator('input[inputmode="numeric"]')
+        visible_inputs = [
+            numeric_inputs.nth(index)
+            for index in range(await numeric_inputs.count())
+            if await numeric_inputs.nth(index).is_visible()
+        ]
+        if len(visible_inputs) >= len(code) and len(code) > 1:
+            for locator, digit in zip(visible_inputs, code, strict=False):
+                await self._type_like_user(
+                    locator,
+                    digit,
+                    options,
+                    delay_ms=typing_delay_ms,
+                )
+            return
+        await self._type_like_user(
+            input_locator,
+            code,
+            options,
+            delay_ms=typing_delay_ms,
+        )
+
+    async def _fresh_totp_code(
+        self,
+        secret: str,
+        options: ExecutionOptions,
+        *,
+        previous_code: str | None = None,
+    ) -> str:
+        deadline = asyncio.get_running_loop().time() + min(options.timeout_ms / 1000, 35)
+        while asyncio.get_running_loop().time() < deadline:
+            code = totp_now(secret)
+            seconds_remaining = 30 - int(time.time()) % 30
+            if code != previous_code and seconds_remaining >= 8:
+                return code
+            await cancellable_sleep(500, options.cancellation)
+        raise ActionError(
+            "TOTP_CODE_UNAVAILABLE",
+            "A fresh two-factor code could not be generated before the timeout.",
+            retryable=True,
+        )
+
+    async def _login_challenge_reason(self, page: Page) -> str | None:
+        text = await page.locator("body").inner_text(timeout=3_000)
+        on_two_factor_page = "two_factor" in page.url.casefold()
+        if on_two_factor_page and re.search(
+            r"incorrect(?:\.|,)?\s*(?:please\s+try\s+again)?|"
+            r"(?:verification\s+)?code.*(?:incorrect|invalid)|"
+            r"(?:验证码|验证代码|动态码|代码).*(?:错误|不正确|无效)|"
+            r"(?:错误|不正确|无效).*(?:验证码|验证代码|动态码|代码)|"
+            r"(?:認証コード|確認コード|コード).*(?:正しくありません|間違|無効)",
+            text,
+            re.I,
+        ):
+            return "two_factor_code_rejected"
+        if re.search(
+            r"wrong password|密码.*(?:错误|不正确)|"
+            r"アカウント.*見つかりません|ユーザー名.*見つかりません|"
+            r"有効なアカウント.*見つかりません|パスワード.*正しくありません",
+            text,
+            re.I,
+        ):
+            return "credentials_rejected"
+        if not on_two_factor_page and re.search(r"\bincorrect\b", text, re.I):
+            return "credentials_rejected"
+        if re.search(
+            r"captcha|arkose|verify you are human|证明你是真人|人机验证|安全检查|"
+            r"人間であることを確認|ロボットではない|セキュリティチェック",
+            text,
+            re.I,
+        ):
+            return "captcha_or_human_verification"
+        if re.search(
+            r"email|phone|verify your identity|确认.*身份|邮箱|手机|手机号|"
+            r"本人確認|メールアドレス|電話番号",
+            text,
+            re.I,
+        ):
+            return "extra_identity_verification"
+        return None
+
+    async def _wait_after_login_attempt(
+        self,
+        page: Page,
+        options: ExecutionOptions,
+        *,
+        expected_username: str | None,
+    ) -> dict[str, Any]:
+        deadline = asyncio.get_running_loop().time() + min(options.timeout_ms / 1000, 60)
+        while asyncio.get_running_loop().time() < deadline:
+            session = await self._account_session_data(page)
+            username = normalize_username(session.get("username"))
+            if session.get("loggedIn") is True:
+                if expected_username and username and username != normalize_username(expected_username):
+                    raise ActionError(
+                        "ACCOUNT_MISMATCH",
+                        "The browser logged in to a different X account.",
+                        {"expectedUsername": normalize_username(expected_username), "actualUsername": username},
+                    )
+                return {
+                    "status": "success",
+                    "session": session,
+                    "url": page.url,
+                    "evidence": ["account-session-authenticated"],
+                }
+            reason = await self._login_challenge_reason(page)
+            if reason:
+                return {
+                    "status": "failed" if reason == "credentials_rejected" else "uncertain",
+                    "reason": reason,
+                    "url": page.url,
+                    "evidence": [reason],
+                }
+            await cancellable_sleep(1_000, options.cancellation)
+        return {
+            "status": "uncertain",
+            "reason": "login_result_not_confirmed",
+            "url": page.url,
+            "session": await self._account_session_data(page),
+        }
+
+    async def account_login(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        expected_username = str(payload.get("expectedUsername") or username).strip() or None
+        if not username or not password:
+            raise ActionError("CONTENT_MISMATCH", "username and password are required.")
+
+        step_delay_ms = int(clamp_number(payload.get("stepDelayMs"), 1800, 500, 30000))
+        typing_delay_ms = int(clamp_number(payload.get("typingDelayMs"), 85, 20, 500))
+        jitter = random.randint(0, max(250, step_delay_ms // 3))
+
+        session = await self._account_session_data(page)
+        current_username = normalize_username(session.get("username"))
+        if session.get("loggedIn") is True:
+            if expected_username and current_username and current_username != normalize_username(expected_username):
+                raise ActionError(
+                    "ACCOUNT_MISMATCH",
+                    "The browser is already logged in to a different X account.",
+                    {"expectedUsername": normalize_username(expected_username), "actualUsername": current_username},
+                )
+            return {"status": "skipped", "reason": "already_authenticated", "session": session}
+
+        await page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=options.timeout_ms)
+        await cancellable_sleep(step_delay_ms + jitter, options.cancellation)
+
+        username_input = await self._wait_for_visible_locator([
+            page.locator('input[autocomplete="username"]'),
+            page.locator('input[name="text"]'),
+            page.get_by_label(
+                re.compile(
+                    "phone|email|username|手机|邮箱|用户名|電話番号|メールアドレス|ユーザー名",
+                    re.I,
+                )
+            ),
+            page.locator('input[type="text"]').first,
+        ], options)
+        if username_input is None:
+            raise ActionError("TARGET_NOT_FOUND", "Could not find the X username field.")
+        await self._type_like_user(username_input, username, options, delay_ms=typing_delay_ms)
+        await cancellable_sleep(step_delay_ms + random.randint(0, 600), options.cancellation)
+        if not await self._click_button_by_name(page, ["Next", "下一步", "次へ", "続ける"], options):
+            await username_input.press("Enter", timeout=options.timeout_ms)
+
+        await cancellable_sleep(step_delay_ms + random.randint(0, 800), options.cancellation)
+        challenge = await self._login_challenge_reason(page)
+        if challenge == "credentials_rejected":
+            return {
+                "status": "failed",
+                "reason": challenge,
+                "url": page.url,
+                "evidence": [challenge],
+            }
+        password_input = await self._wait_for_visible_locator([
+            page.locator('input[name="password"]'),
+            page.locator('input[type="password"]'),
+            page.get_by_label(re.compile("password|密码|パスワード", re.I)),
+        ], options, timeout_ms=8_000)
+        if password_input is None:
+            return {
+                "status": "uncertain",
+                "reason": challenge or "password_field_not_available",
+                "url": page.url,
+                "evidence": [challenge or "password-field-missing"],
+            }
+        await self._type_like_user(password_input, password, options, delay_ms=typing_delay_ms)
+        await cancellable_sleep(step_delay_ms + random.randint(0, 600), options.cancellation)
+        options.trace.mark_mutation_triggered()
+        if not await self._click_button_by_name(page, ["Log in", "登录", "ログイン", "続ける"], options):
+            await password_input.press("Enter", timeout=options.timeout_ms)
+
+        await cancellable_sleep(step_delay_ms + random.randint(0, 800), options.cancellation)
+        two_factor_input = await self._wait_for_visible_locator([
+            page.locator('input[inputmode="numeric"]'),
+            page.locator('input[name="text"]'),
+            page.get_by_label(re.compile("code|验证码|verification|認証コード|確認コード", re.I)),
+        ], options, timeout_ms=8_000)
+        result: dict[str, Any] | None = None
+        if two_factor_input is not None:
+            fixed_code = str(payload.get("twoFactorCode") or "").strip()
+            secret = str(payload.get("totpSecret") or "").strip()
+            if not fixed_code and not secret:
+                return {
+                    "status": "uncertain",
+                    "reason": "two_factor_code_required",
+                    "url": page.url,
+                    "evidence": ["2fa-input-visible"],
+                }
+            previous_code: str | None = None
+            max_attempts = 2 if secret and not fixed_code else 1
+            for attempt in range(max_attempts):
+                code = fixed_code or await self._fresh_totp_code(
+                    secret,
+                    options,
+                    previous_code=previous_code,
+                )
+                await self._fill_two_factor_code(
+                    page,
+                    two_factor_input,
+                    code,
+                    options,
+                    typing_delay_ms=typing_delay_ms,
+                )
+                await cancellable_sleep(step_delay_ms + random.randint(0, 600), options.cancellation)
+                if not await self._click_button_by_name(
+                    page,
+                    ["Next", "Verify", "Done", "Continue", "下一步", "验证", "完成", "继续", "次へ", "確認", "完了", "続ける"],
+                    options,
+                ):
+                    await two_factor_input.press("Enter", timeout=options.timeout_ms)
+                result = await self._wait_after_login_attempt(
+                    page, options, expected_username=expected_username
+                )
+                if result.get("reason") != "two_factor_code_rejected":
+                    break
+                previous_code = code
+                if attempt + 1 >= max_attempts:
+                    raise ActionError(
+                        "TOTP_CODE_REJECTED",
+                        "X rejected the two-factor authentication code.",
+                        {"attempts": max_attempts, "url": page.url},
+                    )
+                two_factor_input = await self._wait_for_visible_locator([
+                    page.locator('input[inputmode="numeric"]'),
+                    page.locator('input[name="text"]'),
+                    page.get_by_label(re.compile("code|验证码|verification|認証コード|確認コード", re.I)),
+                ], options, timeout_ms=5_000)
+                if two_factor_input is None:
+                    raise ActionError(
+                        "TOTP_CODE_REJECTED",
+                        "X rejected the two-factor code and the input was no longer available for retry.",
+                        {"attempts": attempt + 1, "url": page.url},
+                    )
+
+        if result is None:
+            result = await self._wait_after_login_attempt(
+                page, options, expected_username=expected_username
+            )
+        if result.get("status") == "failed" and result.get("reason") == "credentials_rejected":
+            raise ActionError(
+                "LOGIN_CREDENTIALS_REJECTED",
+                "X rejected the supplied username, account identifier, or password.",
+                {"url": result.get("url")},
+            )
+        if result["status"] == "uncertain" and result.get("reason") in {
+            "captcha_or_human_verification",
+            "extra_identity_verification",
+        }:
+            raise ActionError(
+                "LOGIN_CHALLENGE_REQUIRED",
+                "X requested an additional verification step.",
+                {"reason": result["reason"], "url": result.get("url")},
+                uncertain=True,
+            )
+        return result
+
     async def _account_session_data(self, page: Page) -> dict[str, Any]:
         switcher = page.locator('[data-testid="SideNav_AccountSwitcher_Button"]')
         text = await switcher.inner_text() if await switcher.count() else ""
@@ -960,12 +1454,113 @@ class XAdapter:
             results.setdefault(normalize_username(username), {"username": username, "handle": f"@{username}", "displayName": next((line for line in text.splitlines() if line and not line.startswith("@")), None), "profileUrl": f"https://x.com/{username}", "relationship": relationship_state((await button.get_attribute("data-testid") or "") if await button.count() else "", (await button.get_attribute("aria-label") or "") if await button.count() else "")})
         return {"status": "success", "accounts": list(results.values())[:20]}
 
+    async def account_list_posts(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
+        if classify_page(page.url) != "profile":
+            raise ActionError("PAGE_UNSUPPORTED", "Account posts require a profile page.")
+        username = urlparse(page.url).path.strip("/")
+        if not is_safe_username(username):
+            raise ActionError("PROFILE_STATE_UNKNOWN", "Could not identify the current profile username.")
+        max_posts = int(clamp_number(payload.get("maxPosts"), 10, 1, 50))
+        include_replies = payload.get("includeReplies") is True
+        include_pinned = payload.get("includePinned", True) is not False
+        articles = page.locator('[data-testid="primaryColumn"] article[data-testid="tweet"]')
+        posts: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        filtered_replies = filtered_pinned = filtered_other_authors = 0
+        for index in range(await articles.count()):
+            if len(posts) >= max_posts:
+                break
+            article = articles.nth(index)
+            try:
+                post = await self._post(article, include_ads=False)
+            except ActionError:
+                continue
+            post_id = str(post.get("postId") or "")
+            author = normalize_username((post.get("author") or {}).get("username"))
+            if not post_id or post_id in seen:
+                continue
+            seen.add(post_id)
+            if author != normalize_username(username):
+                filtered_other_authors += 1
+                continue
+            text = await article.inner_text()
+            if not include_replies and re.search(r"Replying to|\u6b63\u5728\u56de\u590d|\u56de\u590d @", text, re.I):
+                filtered_replies += 1
+                continue
+            if not include_pinned and re.search(r"(^|\n)Pinned(\n|$)|(^|\n)\u5df2\u7f6e\u9876(\n|$)|(^|\n)\u7f6e\u9876(\n|$)", text, re.I):
+                filtered_pinned += 1
+                continue
+            posts.append(post)
+        return {
+            "status": "success",
+            "username": username,
+            "posts": posts,
+            "visibleCount": await articles.count(),
+            "filteredReplyCount": filtered_replies,
+            "filteredPinnedCount": filtered_pinned,
+            "filteredOtherAuthorCount": filtered_other_authors,
+        }
+
+    async def account_scroll_posts(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
+        if classify_page(page.url) != "profile":
+            raise ActionError("PAGE_UNSUPPORTED", "Account post scrolling requires a profile page.")
+        distance = int(clamp_number(payload.get("distance"), 650, 200, 3000))
+        before = int(await page.evaluate("window.scrollY"))
+        await page.mouse.wheel(0, distance)
+        await cancellable_sleep(250, options.cancellation)
+        after = int(await page.evaluate("window.scrollY"))
+        maximum = int(await page.evaluate("Math.max(0, document.documentElement.scrollHeight-innerHeight)"))
+        at_boundary = after >= maximum
+        return {
+            "status": "skipped" if after == before else "success",
+            "reason": "profile-boundary" if after == before else None,
+            "startY": before,
+            "endY": after,
+            "scrolls": 0 if after == before else 1,
+            "atBoundary": at_boundary,
+        }
+
     def _profile_relationship_locator(self, page: Page, username: str) -> Locator:
         primary = page.locator('[data-testid="primaryColumn"]')
         return primary.locator(f'button[data-testid="{username}-follow"], button[data-testid="{username}-unfollow"], button[aria-label="Follow @{username}"], button[aria-label="Following @{username}"], button[aria-label="Requested @{username}"]').first
 
     async def account_follow(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         return await self._relationship_action(page, options, follow=True)
+
+    async def account_follow_handle(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
+        username = str(payload.get("handle") or "").strip().removeprefix("@")
+        if not is_safe_username(username):
+            raise ActionError("CONTENT_MISMATCH", "handle must be a valid X username.")
+        profile_page = await page.context.new_page()
+        try:
+            await profile_page.goto(
+                f"https://x.com/{username}",
+                wait_until="domcontentloaded",
+                timeout=options.timeout_ms,
+            )
+            details = await self.account_get_details(
+                profile_page,
+                {"handle": username},
+                options,
+            )
+            if details.get("status") == "navigating":
+                await cancellable_sleep(500, options.cancellation)
+                details = await self.account_get_details(
+                    profile_page,
+                    {"handle": username},
+                    options,
+                )
+            result = await self._relationship_action(profile_page, options, follow=True)
+            return {
+                **result,
+                "requestedHandle": f"@{username}",
+                "account": details.get("account"),
+            }
+        finally:
+            try:
+                await profile_page.close()
+            except Exception:
+                pass
 
     async def account_unfollow(self, page: Page, payload: dict[str, Any], options: ExecutionOptions) -> dict[str, Any]:
         return await self._relationship_action(page, options, follow=False)
